@@ -102,7 +102,9 @@ public:
 			// If not found, start the read.
 			if (i == f->m_blocks.end() || (i->second.isValid() && i->second.isError())) {
 				// printf("starting read of %s block %d\n", f->getFilename().c_str(), blockNum);
-				fblock = readBlock(f.getPtr(), f->m_block_size, (int64_t)f->m_block_size * blockNum);
+				int64_t maxReadBytes = fileSize - (int64_t)blockNum * f->m_block_size;
+				int64_t readLength = std::min<int64_t>(f->m_block_size, maxReadBytes);
+				fblock = readBlock(f.getPtr(), readLength, (int64_t)f->m_block_size * blockNum);
 				f->m_blocks[blockNum] = fblock;
 			} else
 				fblock = i->second;
