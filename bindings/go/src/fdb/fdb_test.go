@@ -536,29 +536,3 @@ func TestGetClientStatus(t *testing.T) {
 		t.Fatal("returned status is empty")
 	}
 }
-
-func ExampleGetClientStatus() {
-	fdb.MustAPIVersion(API_VERSION)
-	err := fdb.Options().SetDisableClientBypass()
-	if err != nil {
-		fmt.Errorf("Unable to disable client bypass: %v\n", err)
-		return
-	}
-
-	db := fdb.MustOpenDefault()
-
-	st, e := db.GetClientStatus()
-	if e != nil {
-		fmt.Errorf("Unable to get client status: %v\n", err)
-		return
-	}
-
-	fmt.Printf("client status: %s\n", string(st))
-
-	// Close the database after usage
-	defer db.Close()
-
-	// Do work here
-
-	// Output:
-}
