@@ -19,9 +19,7 @@
 
 module github.com/apple/foundationdb/fdbkubernetesmonitor
 
-go 1.24.0
-
-toolchain go1.24.4
+go 1.24.6
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0
