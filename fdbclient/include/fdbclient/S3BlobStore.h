@@ -231,6 +231,9 @@ public:
 		if (host.empty() || (proxyHost.present() != proxyPort.present()))
 			throw connection_string_invalid();
 
+		this->isGcp = host.find("googleapis") != std::string::npos;
+		this->headerPrefix = this->isGcp ? "x-goog-" : "x-amz-";
+
 		// set connection pool instance
 		if (useProxy || !knobs.global_connection_pool) {
 			// don't use global connection pool if there's a proxy, as it complicates the logic
@@ -281,6 +284,8 @@ public:
 	Future<ReusableConnection> connect(bool* reusingConn);
 	void returnConnection(ReusableConnection& conn);
 
+	bool isGcp;
+	std::string headerPrefix;
 	std::string host;
 	std::string service;
 	std::string region;
