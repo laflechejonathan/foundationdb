@@ -20,13 +20,15 @@
 
 #include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/BackupContainer.h"
+#include "fdbclient/GCSBlobStore.h"
+#include "fdbclient/S3BlobStore.h"
 #include "flow/BooleanParam.h"
 #ifdef BUILD_AZURE_BACKUP
 #include "fdbclient/BackupContainerAzureBlobStore.h"
 #endif
 #include "fdbclient/BackupContainerFileSystem.h"
 #include "fdbclient/BackupContainerLocalDirectory.h"
-#include "fdbclient/BackupContainerS3BlobStore.h"
+#include "fdbclient/BackupContainerBlobStore.h"
 #include "fdbclient/JsonBuilder.h"
 #include "flow/StreamCipher.h"
 #include "flow/UnitTest.h"
@@ -1655,26 +1657,24 @@ Reference<BackupContainerFileSystem> BackupContainerFileSystem::openContainerFS(
 			std::string resource;
 			Optional<std::string> blobstoreProxy;
 
-			// If no proxy is passed down to the openContainer method, try to fallback to the
-			// fileBackupAgentProxy which is a global variable and will be set for the backup_agent.
-			if (proxy.present()) {
-				blobstoreProxy = proxy.get();
-			} else if (fileBackupAgentProxy.present()) {
-				blobstoreProxy = fileBackupAgentProxy.get();
-			}
-
 			// The URL parameters contain blobstore endpoint tunables as well as possible backup-specific options.
-			S3BlobStoreEndpoint::ParametersT backupParams;
-			Reference<S3BlobStoreEndpoint> bstore =
+			IBlobStoreEndpoint::ParametersT backupParams;
+			Reference<IBlobStoreEndpoint> bstore =
 			    S3BlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 
-			if (resource.empty())
-				throw backup_invalid_url();
-			for (auto c : resource)
-				if (!isalnum(c) && c != '_' && c != '-' && c != '.' && c != '/')
-					throw backup_invalid_url();
-			r = makeReference<BackupContainerS3BlobStore>(
+			validateBackupUrl(resource);
+			r = makeReference<BackupContainerBlobStore>(
 			    bstore, resource, backupParams, encryptionKeyFileName, isBackup);
+		} else if (u.startsWith("gcs://"_sr)) {
+			std::string resource;
+
+			// The URL parameters contain GCS endpoint tunables as well as possible backup-specific options.
+			IBlobStoreEndpoint::ParametersT backupParams;
+			Reference<IBlobStoreEndpoint> gcs =
+			    GCSBlobStoreEndpoint::fromString(url, &resource, &lastOpenError, &backupParams);
+
+			validateBackupUrl(resource);
+			r = makeReference<BackupContainerBlobStore>(gcs, resource, backupParams, encryptionKeyFileName, isBackup);
 		}
 #ifdef BUILD_AZURE_BACKUP
 		else if (u.startsWith("azure://"_sr)) {
