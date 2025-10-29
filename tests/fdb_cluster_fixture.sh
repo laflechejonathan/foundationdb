@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Functions to stand up an fdb cluster.
 # To use:

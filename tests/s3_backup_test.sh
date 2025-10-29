@@ -1,11 +1,14 @@
 #!/bin/bash
+set -euo pipefail
+# Test backup and restore from s3 or GCS.
 #
 # Test backup and restore from s3.
 #
 # In the below we start a small FDB cluster, populate it with
-# some data and then start up a seaweedfs instance or use S3
-# if it is available. We then run a backup to 'S3' and then
-# a restore. We verify the restore is the same as the original.
+# some data and then start up a seaweedfs instance, use S3
+# if it is available, or use a GCS emulator. We then run a
+# backup to the blob store and then a restore. We verify the
+# restore is the same as the original.
 #
 # Debugging, run this script w/ the -x flag: e.g. bash -x s3_backup_test.sh...
 # You can also disable the cleanup. This will leave processes up
@@ -13,7 +16,11 @@
 # under SCRATCH_DIR.
 #
 # Usage:
-#   s3_backup_unified.sh <source_dir> <build_dir> [scratch_dir] [--encrypt]
+#   s3_backup_unified.sh <source_dir> <build_dir> [scratch_dir] [--encrypt] [--gcs]
+#
+# Options:
+#   --encrypt  Enable backup encryption with a test key
+#   --gcs      Use GCS emulator at localhost:9023 instead of S3/SeaweedFS
 #
 # See https://apple.github.io/foundationdb/backups.html
 
@@ -157,7 +164,7 @@ function test_s3_backup_and_restore {
   local edited_url=$(echo "${local_url}" | sed -e "s/ctest/data\/ctest/" )
   readonly edited_url
   if [[ "${USE_S3}" == "true" ]]; then
-    # Run this rm only if s3. In seaweed, it would fail because
+    # Run this rm only if s3. In seaweed/GCS, it would fail because
     # bucket doesn't exist yet (they are lazily created).
     local preclear_cmd=("${local_build_dir}/bin/s3client")
     preclear_cmd+=("${KNOBS[@]}")
@@ -207,12 +214,17 @@ set -o noclobber
 
 # Parse command line arguments
 USE_ENCRYPTION=false
+USE_GCS=false
 PARAMS=()
 
 while (( "$#" )); do
   case "$1" in
     --encrypt)
       USE_ENCRYPTION=true
+      shift
+      ;;
+    --gcs)
+      USE_GCS=true
       shift
       ;;
     -*|--*=) # unsupported flags
@@ -240,10 +252,14 @@ readonly TAG="test_backup"
 # internal apple dev environments where S3 is available).
 readonly USE_S3="${USE_S3:-$( if [[ -n "${OKTETO_NAMESPACE+x}" ]]; then echo "true" ; else echo "false"; fi )}"
 
-# Set KNOBS based on whether we're using real S3 or SeaweedFS
+# Set KNOBS based on whether we're using real S3, GCS, GCS Emulator, or SeaweedFS
+# This will be finalized after we determine the storage backend
 if [[ "${USE_S3}" == "true" ]]; then
   # Use AWS KMS encryption for real S3
   KNOBS=("--knob_blobstore_encryption_type=aws:kms" "--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
+elif [[ "${USE_GCS}" == "true" ]]; then
+  # TLS settings for GCP will be added later
+  KNOBS=("--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
 else
   # No encryption for SeaweedFS
   KNOBS=("--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
@@ -326,12 +342,40 @@ if [[ "${USE_ENCRYPTION}" == "true" ]]; then
 fi
 readonly ENCRYPTION_KEY_FILE
 
-# Set host, bucket, and blob_credentials_file whether seaweed or s3.
+# Set host, bucket, and blob_credentials_file whether seaweed, s3, or gcs.
 readonly path_prefix="ctests"
 host=
 query_str=
 blob_credentials_file=
-if [[ "${USE_S3}" == "true" ]]; then
+url_prefix="blobstore"
+
+if [[ "${USE_GCS}" == "true" ]]; then
+  log "Testing against real GCP"
+  # Use real GCP storage.googleapis.com
+  readonly host="storage.googleapis.com"
+  readonly bucket="palantir-foundationdb-gcp-dev"
+  # Create test scratch directory
+  TEST_SCRATCH_DIR="${scratch_dir}/gcs_test_$$"
+  if ! mkdir -p "${TEST_SCRATCH_DIR}"; then
+    err "Failed create of the test dir: ${TEST_SCRATCH_DIR}" >&2
+    exit 1
+  fi
+  readonly TEST_SCRATCH_DIR
+  # Use real GCP credentials
+  readonly blob_credentials_file="/Volumes/git/hacking/gcp/token.json"
+  if [[ ! -f "${blob_credentials_file}" ]]; then
+    err "GCP credentials file not found: ${blob_credentials_file}"
+    exit 1
+  fi
+  # Use secure TLS connection for real GCP with custom CA
+  query_str="secure_connection=1&bucket=$bucket&gcs=1"
+  url_prefix="blobstore"
+  # Set environment variable for GCS credentials
+  export GCS_CREDENTIALS_FILE="${blob_credentials_file}"
+  # Add TLS knobs for GCP (must be done before KNOBS becomes readonly)
+  KNOBS+=("--tls-verify-peers=Check.Valid=0")
+  readonly KNOBS
+elif [[ "${USE_S3}" == "true" ]]; then
   log "Testing against s3"
   # Now source in the aws fixture so we can use its methods in the below.
   # shellcheck source=/dev/null
@@ -356,6 +400,7 @@ if [[ "${USE_S3}" == "true" ]]; then
   # Make these environment variables available for the fdb cluster and backup_agent when s3.
   export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
   export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
+  readonly KNOBS
 else
   log "Testing against seaweedfs"
   # Now source in the seaweedfs fixture so we can use its methods in the below.

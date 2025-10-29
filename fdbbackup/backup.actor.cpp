@@ -48,6 +48,7 @@
 #include "fdbclient/IKnobCollection.h"
 #include "fdbclient/RunRYWTransaction.actor.h"
 #include "fdbclient/S3BlobStore.h"
+#include "fdbclient/GCSBlobStore.h"
 #include "fdbclient/SystemData.h"
 #include "fdbclient/json_spirit/json_spirit_writer_template.h"
 

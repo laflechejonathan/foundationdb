@@ -1,5 +1,5 @@
 /*
- * BackupContainerS3BlobStore.actor.cpp
+ * BackupContainerBlobStore.actor.cpp
  *
  * This source file is part of the FoundationDB open source project
  *
@@ -18,13 +18,14 @@
  * limitations under the License.
  */
 
-#include "fdbclient/AsyncFileS3BlobStore.actor.h"
-#include "fdbclient/BackupContainerS3BlobStore.h"
+#include "fdbclient/AsyncFileBlobStore.actor.h"
+#include "fdbclient/BackupContainerBlobStore.h"
+#include "fdbclient/IBlobStoreEndpoint.h"
 #include "fdbrpc/AsyncFileEncrypted.h"
 #include "fdbrpc/AsyncFileReadAhead.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
-class BackupContainerS3BlobStoreImpl {
+class BackupContainerBlobStoreImpl {
 public:
 	// Backup files to under a single folder prefix with subfolders for each named backup
 	static const std::string DATAFOLDER;
@@ -33,13 +34,13 @@ public:
 	// number of slashes so the backup names are kept in a separate folder tree from their actual data.
 	static const std::string INDEXFOLDER;
 
-	ACTOR static Future<std::vector<std::string>> listURLs(Reference<S3BlobStoreEndpoint> bstore, std::string bucket) {
+	ACTOR static Future<std::vector<std::string>> listURLs(Reference<IBlobStoreEndpoint> bstore, std::string bucket) {
 		state std::string basePath = INDEXFOLDER + '/';
-		S3BlobStoreEndpoint::ListResult contents = wait(bstore->listObjects(bucket, basePath));
+		IBlobStoreEndpoint::ListResult contents = wait(bstore->listObjects(bucket, basePath));
 		std::vector<std::string> results;
 		for (const auto& f : contents.objects) {
 			results.push_back(
-			    bstore->getResourceURL(f.name.substr(basePath.size()), format("bucket=%s", bucket.c_str())));
+				bstore->getResourceURL(f.name.substr(basePath.size()), format("bucket=%s", bucket.c_str())));
 		}
 		return results;
 	}
@@ -74,7 +75,7 @@ public:
 	};
 
 	ACTOR static Future<BackupContainerFileSystem::FilesAndSizesT> listFiles(
-	    Reference<BackupContainerS3BlobStore> bc,
+	    Reference<BackupContainerBlobStore> bc,
 	    std::string path,
 	    std::function<bool(std::string const&)> pathFilter) {
 		// pathFilter expects container based paths, so create a wrapper which converts a raw path
@@ -85,7 +86,7 @@ public:
 			return pathFilter(folderPath.substr(prefixTrim));
 		};
 
-		state S3BlobStoreEndpoint::ListResult result = wait(bc->m_bstore->listObjects(
+		state IBlobStoreEndpoint::ListResult result = wait(bc->m_bstore->listObjects(
 		    bc->m_bucket, bc->dataPath(path), '/', std::numeric_limits<int>::max(), rawPathFilter));
 		BackupContainerFileSystem::FilesAndSizesT files;
 		for (const auto& o : result.objects) {
@@ -95,7 +96,7 @@ public:
 		return files;
 	}
 
-	ACTOR static Future<Void> create(Reference<BackupContainerS3BlobStore> bc) {
+	ACTOR static Future<Void> create(Reference<BackupContainerBlobStore> bc) {
 		wait(bc->m_bstore->createBucket(bc->m_bucket));
 
 		// Check/create the index entry
@@ -111,7 +112,7 @@ public:
 		return Void();
 	}
 
-	ACTOR static Future<Void> deleteContainer(Reference<BackupContainerS3BlobStore> bc, int* pNumDeleted) {
+	ACTOR static Future<Void> deleteContainer(Reference<BackupContainerBlobStore> bc, int* pNumDeleted) {
 		bool e = wait(bc->exists());
 		if (!e) {
 			TraceEvent(SevWarnAlways, "BackupContainerDoesNotExist").detail("URL", bc->getURL());
@@ -128,15 +129,15 @@ public:
 	}
 };
 
-const std::string BackupContainerS3BlobStoreImpl::DATAFOLDER = "data";
-const std::string BackupContainerS3BlobStoreImpl::INDEXFOLDER = "backups";
+const std::string BackupContainerBlobStoreImpl::DATAFOLDER = "data";
+const std::string BackupContainerBlobStoreImpl::INDEXFOLDER = "backups";
 
-std::string BackupContainerS3BlobStore::dataPath(const std::string& path) {
+std::string BackupContainerBlobStore::dataPath(const std::string& path) {
 	// if backup, include the backup data prefix.
 	// if m_name ends in a trailing slash, don't add another
 	std::string dataPath = "";
 	if (isBackup) {
-		dataPath = BackupContainerS3BlobStoreImpl::DATAFOLDER + "/";
+		dataPath = BackupContainerBlobStoreImpl::DATAFOLDER + "/";
 	}
 	if (!m_name.empty() && m_name.back() == '/') {
 		dataPath += m_name + path;
@@ -147,14 +148,14 @@ std::string BackupContainerS3BlobStore::dataPath(const std::string& path) {
 }
 
 // Get the path of the backups's index entry
-std::string BackupContainerS3BlobStore::indexEntry() {
+std::string BackupContainerBlobStore::indexEntry() {
 	ASSERT(isBackup);
-	return BackupContainerS3BlobStoreImpl::INDEXFOLDER + "/" + m_name;
+	return BackupContainerBlobStoreImpl::INDEXFOLDER + "/" + m_name;
 }
 
-BackupContainerS3BlobStore::BackupContainerS3BlobStore(Reference<S3BlobStoreEndpoint> bstore,
+BackupContainerBlobStore::BackupContainerBlobStore(Reference<IBlobStoreEndpoint> bstore,
                                                        const std::string& name,
-                                                       const S3BlobStoreEndpoint::ParametersT& params,
+                                                       const IBlobStoreEndpoint::ParametersT& params,
                                                        const Optional<std::string>& encryptionKeyFileName,
                                                        bool isBackup)
   : m_bstore(bstore), m_name(name), m_bucket("FDB_BACKUPS_V2"), isBackup(isBackup) {
@@ -165,25 +166,21 @@ BackupContainerS3BlobStore::BackupContainerS3BlobStore(Reference<S3BlobStoreEndp
 			m_bucket = value;
 			continue;
 		}
-		TraceEvent(SevWarn, "BackupContainerS3BlobStoreInvalidParameter").detail("Name", name).detail("Value", value);
+		TraceEvent(SevWarn, "BackupContainerBlobStoreInvalidParameter").detail("Name", name).detail("Value", value);
 		IBackupContainer::lastOpenError = format("Unknown URL parameter: '%s'", name.c_str());
 		throw backup_invalid_url();
 	}
 }
 
-void BackupContainerS3BlobStore::addref() {
-	return ReferenceCounted<BackupContainerS3BlobStore>::addref();
+void BackupContainerBlobStore::addref() {
+	this->ReferenceCounted<IBlobStoreEndpoint>::addref();
 }
-void BackupContainerS3BlobStore::delref() {
-	return ReferenceCounted<BackupContainerS3BlobStore>::delref();
-}
-
-std::string BackupContainerS3BlobStore::getURLFormat() {
-	return S3BlobStoreEndpoint::getURLFormat(true) + " (Note: The 'bucket' parameter is required.)";
+void BackupContainerBlobStore::delref() {
+	this->ReferenceCounted<IBlobStoreEndpoint>::delref();
 }
 
-Future<Reference<IAsyncFile>> BackupContainerS3BlobStore::readFile(const std::string& path) {
-	Reference<IAsyncFile> f = makeReference<AsyncFileS3BlobStoreRead>(m_bstore, m_bucket, dataPath(path));
+Future<Reference<IAsyncFile>> BackupContainerBlobStore::readFile(const std::string& path) {
+	Reference<IAsyncFile> f = makeReference<AsyncFileBlobStoreRead>(m_bstore, m_bucket, dataPath(path));
 
 	if (usesEncryption()) {
 		f = makeReference<AsyncFileEncrypted>(f, AsyncFileEncrypted::Mode::READ_ONLY);
@@ -198,47 +195,47 @@ Future<Reference<IAsyncFile>> BackupContainerS3BlobStore::readFile(const std::st
 	return f;
 }
 
-Future<std::vector<std::string>> BackupContainerS3BlobStore::listURLs(Reference<S3BlobStoreEndpoint> bstore,
+Future<std::vector<std::string>> BackupContainerBlobStore::listURLs(Reference<IBlobStoreEndpoint> bstore,
                                                                       const std::string& bucket) {
-	return BackupContainerS3BlobStoreImpl::listURLs(bstore, bucket);
+	return BackupContainerBlobStoreImpl::listURLs(bstore, bucket);
 }
 
-Future<Reference<IBackupFile>> BackupContainerS3BlobStore::writeFile(const std::string& path) {
-	Reference<IAsyncFile> f = makeReference<AsyncFileS3BlobStoreWrite>(m_bstore, m_bucket, dataPath(path));
+Future<Reference<IBackupFile>> BackupContainerBlobStore::writeFile(const std::string& path) {
+	Reference<IAsyncFile> f = makeReference<AsyncFileBlobStoreWrite>(m_bstore, m_bucket, dataPath(path));
 	if (usesEncryption()) {
 		f = makeReference<AsyncFileEncrypted>(f, AsyncFileEncrypted::Mode::APPEND_ONLY);
 	}
-	return Future<Reference<IBackupFile>>(makeReference<BackupContainerS3BlobStoreImpl::BackupFile>(path, f));
+	return Future<Reference<IBackupFile>>(makeReference<BackupContainerBlobStoreImpl::BackupFile>(path, f));
 }
 
-Future<Void> BackupContainerS3BlobStore::writeEntireFile(const std::string& path, const std::string& fileContents) {
+Future<Void> BackupContainerBlobStore::writeEntireFile(const std::string& path, const std::string& fileContents) {
 	return m_bstore->writeEntireFile(m_bucket, dataPath(path), fileContents);
 }
 
-Future<Void> BackupContainerS3BlobStore::deleteFile(const std::string& path) {
+Future<Void> BackupContainerBlobStore::deleteFile(const std::string& path) {
 	return m_bstore->deleteObject(m_bucket, dataPath(path));
 }
 
-Future<BackupContainerFileSystem::FilesAndSizesT> BackupContainerS3BlobStore::listFiles(
+Future<BackupContainerFileSystem::FilesAndSizesT> BackupContainerBlobStore::listFiles(
     const std::string& path,
     std::function<bool(std::string const&)> pathFilter) {
-	return BackupContainerS3BlobStoreImpl::listFiles(
-	    Reference<BackupContainerS3BlobStore>::addRef(this), path, pathFilter);
+	return BackupContainerBlobStoreImpl::listFiles(
+	    Reference<BackupContainerBlobStore>::addRef(this), path, pathFilter);
 }
 
-Future<Void> BackupContainerS3BlobStore::create() {
-	return BackupContainerS3BlobStoreImpl::create(Reference<BackupContainerS3BlobStore>::addRef(this));
+Future<Void> BackupContainerBlobStore::create() {
+	return BackupContainerBlobStoreImpl::create(Reference<BackupContainerBlobStore>::addRef(this));
 }
 
-Future<bool> BackupContainerS3BlobStore::exists() {
+Future<bool> BackupContainerBlobStore::exists() {
 	return m_bstore->objectExists(m_bucket, indexEntry());
 }
 
-Future<Void> BackupContainerS3BlobStore::deleteContainer(int* pNumDeleted) {
-	return BackupContainerS3BlobStoreImpl::deleteContainer(Reference<BackupContainerS3BlobStore>::addRef(this),
+Future<Void> BackupContainerBlobStore::deleteContainer(int* pNumDeleted) {
+	return BackupContainerBlobStoreImpl::deleteContainer(Reference<BackupContainerBlobStore>::addRef(this),
 	                                                       pNumDeleted);
 }
 
-std::string BackupContainerS3BlobStore::getBucket() const {
+std::string BackupContainerBlobStore::getBucket() const {
 	return m_bucket;
 }
