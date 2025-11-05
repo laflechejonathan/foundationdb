@@ -267,11 +267,11 @@ fi
 readonly KNOBS
 
 # Set TLS_CA_FILE only when using real S3, not for SeaweedFS
-if [[ "${USE_S3}" == "true" ]]; then
+if [[ "${USE_S3}" == "true" || "${USE_GCS}" == "true" ]]; then
   # Try to find a valid TLS CA file if not explicitly set
   if [[ -z "${TLS_CA_FILE:-}" ]]; then
     # Common locations for TLS CA files on different systems
-    for ca_file in "/etc/pki/tls/cert.pem" "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem" "/etc/ssl/certs/ca-certificates.crt" "/etc/pki/tls/certs/ca-bundle.crt" "/etc/ssl/cert.pem" "/usr/local/share/ca-certificates/"; do
+    for ca_file in "/etc/pki/tls/cert.pem" "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem" "/etc/ssl/certs/ca-certificates.crt" "/etc/pki/tls/certs/ca-bundle.crt" "/etc/ssl/cert.pem" "/usr/local/share/ca-certificates/" "/opt/homebrew/etc/openssl@3/cert.pem"; do
       if [[ -f "${ca_file}" ]]; then
         TLS_CA_FILE="${ca_file}"
         break
@@ -352,7 +352,8 @@ url_prefix="blobstore"
 if [[ "${USE_GCS}" == "true" ]]; then
   log "Testing against real GCP"
   # Use real GCP storage.googleapis.com
-  readonly host="storage.googleapis.com"
+
+  readonly host="@storage.googleapis.com"
   readonly bucket="palantir-foundationdb-gcp-dev"
   # Create test scratch directory
   TEST_SCRATCH_DIR="${scratch_dir}/gcs_test_$$"
@@ -371,9 +372,10 @@ if [[ "${USE_GCS}" == "true" ]]; then
   query_str="secure_connection=1&bucket=$bucket&gcs=1"
   url_prefix="blobstore"
   # Set environment variable for GCS credentials
-  export GCS_CREDENTIALS_FILE="${blob_credentials_file}"
-  # Add TLS knobs for GCP (must be done before KNOBS becomes readonly)
-  KNOBS+=("--tls-verify-peers=Check.Valid=0")
+  export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
+  export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
+#  # Add TLS knobs for GCP (must be done before KNOBS becomes readonly)
+#  KNOBS+=("--tls-verify-peers=Check.Valid=0")
   readonly KNOBS
 elif [[ "${USE_S3}" == "true" ]]; then
   log "Testing against s3"

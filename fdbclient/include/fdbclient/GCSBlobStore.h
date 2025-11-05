@@ -38,8 +38,6 @@ public:
 
 	struct Credentials {
 		std::string token;
-
-		bool isEmpty() const { return token.empty(); }
 	};
 
 	struct ReusableConnection {
@@ -85,7 +83,7 @@ public:
 
 	GCSBlobStoreEndpoint(std::string const& host,
 	                     std::string const& service,
-	                     Credentials const& credentials = Credentials(),
+	                     Optional<Credentials> const& credentials,
 	                     BlobKnobs const& knobs = BlobKnobs())
 	  : host(host), service(service), credentials(credentials), knobs(knobs),
 	    requestRate(new SpeedLimit(knobs.requests_per_second, 1)),
@@ -131,7 +129,7 @@ public:
 
 	std::string host;
 	std::string service;
-	Credentials credentials;
+	Optional<Credentials> credentials;
 	BlobKnobs knobs;
 
 	Reference<ConnectionPoolData> connectionPool;
@@ -154,6 +152,7 @@ public:
 	                                                    UnsentPacketQueue* pContent,
 	                                                    int contentLen,
 	                                                    std::set<unsigned int> successCodes);
+	Future<Void> updateSecret() override;
 
 	// IBlobStoreEndpoint virtual method overrides
 	Future<bool> bucketExists(std::string const& bucket) override;

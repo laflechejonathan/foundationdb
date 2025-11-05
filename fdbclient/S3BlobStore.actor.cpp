@@ -37,7 +37,6 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string.hpp>
-#include "flow/IAsyncFile.h"
 #include "flow/Hostname.h"
 #include "flow/UnitTest.h"
 #include "rapidxml/rapidxml.hpp"
@@ -48,6 +47,7 @@
 #include "flow/actorcompiler.h" // has to be last include
 
 using namespace rapidxml;
+
 
 json_spirit::mObject S3BlobStoreEndpoint::Stats::getJSON() {
 	json_spirit::mObject o;
@@ -221,13 +221,13 @@ Reference<S3BlobStoreEndpoint> S3BlobStoreEndpoint::fromString(const std::string
 		if (resourceFromURL != nullptr)
 			*resourceFromURL = resource.toString();
 
-		Optional<S3BlobStoreEndpoint::Credentials> creds;
+		Optional<Credentials> creds;
 		if (cred.present()) {
 			StringRef c(cred.get());
 			StringRef key = c.eat(":");
 			StringRef secret = c.eat(":");
 			StringRef securityToken = c.eat();
-			creds = S3BlobStoreEndpoint::Credentials{ key.toString(), secret.toString(), securityToken.toString() };
+			creds = Credentials{ key.toString(), secret.toString(), securityToken.toString() };
 		}
 
 		if (region.empty() && CLIENT_KNOBS->HTTP_REQUEST_AWS_V4_HEADER) {
@@ -484,41 +484,6 @@ ACTOR Future<int64_t> objectSize_impl(Reference<S3BlobStoreEndpoint> b, std::str
 
 Future<int64_t> S3BlobStoreEndpoint::objectSize(std::string const& bucket, std::string const& object) {
 	return objectSize_impl(Reference<S3BlobStoreEndpoint>::addRef(this), bucket, object);
-}
-
-// Try to read a file, parse it as JSON, and return the resulting document.
-// It will NOT throw if any errors are encountered, it will just return an empty
-// JSON object and will log trace events for the errors encountered.
-ACTOR Future<Optional<json_spirit::mObject>> tryReadJSONFile(std::string path) {
-	state std::string content;
-
-	// Event type to be logged in the event of an exception
-	state const char* errorEventType = "BlobCredentialFileError";
-
-	try {
-		state Reference<IAsyncFile> f = wait(IAsyncFileSystem::filesystem()->open(
-		    path, IAsyncFile::OPEN_NO_AIO | IAsyncFile::OPEN_READONLY | IAsyncFile::OPEN_UNCACHED, 0));
-		state int64_t size = wait(f->size());
-		state Standalone<StringRef> buf = makeString(size);
-		int r = wait(f->read(mutateString(buf), size, 0));
-		ASSERT(r == size);
-		content = buf.toString();
-
-		// Any exceptions from hehre forward are parse failures
-		errorEventType = "BlobCredentialFileParseFailed";
-		json_spirit::mValue json;
-		json_spirit::read_string(content, json);
-		if (json.type() == json_spirit::obj_type)
-			return json.get_obj();
-		else
-			TraceEvent(SevWarn, "BlobCredentialFileNotJSONObject").suppressFor(60).detail("File", path);
-
-	} catch (Error& e) {
-		if (e.code() != error_code_actor_cancelled)
-			TraceEvent(SevWarn, errorEventType).errorUnsuppressed(e).suppressFor(60).detail("File", path);
-	}
-
-	return Optional<json_spirit::mObject>();
 }
 
 // If the credentials expire, the connection will eventually fail and be discarded from the pool, and then a new

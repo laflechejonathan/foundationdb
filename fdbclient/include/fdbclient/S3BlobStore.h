@@ -254,7 +254,7 @@ public:
 	FlowLock concurrentUploads;
 	FlowLock concurrentLists;
 
-	Future<Void> updateSecret();
+	Future<Void> updateSecret() override;
 
 	// Calculates the authentication string from the secret key
 	static std::string hmac_sha1(Credentials const& creds, std::string const& msg);

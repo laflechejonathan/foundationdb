@@ -23,6 +23,7 @@
 #include "flow/IConnection.h"
 #include "fdbclient/json_spirit/json_spirit_reader_template.h"
 #include "fdbrpc/Stats.h"
+#include "fdbclient/JSONDoc.h"
 #include <fstream>
 
 #include "flow/actorcompiler.h" // has to be last include
@@ -114,6 +115,13 @@ Reference<GCSBlobStoreEndpoint> GCSBlobStoreEndpoint::fromString(const std::stri
 		if (prefix != "blobstore"_sr)
 			throw format("Invalid URL prefix '%s'", prefix.toString().c_str());
 
+		// Check for credentials before @ symbol (similar to S3)
+		// The credential can be empty (just "@") which indicates to look up credentials from file
+		Optional<StringRef> cred;
+		if (url.find("@") != std::string::npos) {
+			cred = t.eat("@");
+		}
+
 		// Parse host:port/resource?params
 		uint8_t foundSeparator = 0;
 		StringRef hostPort = t.eatAny("/?", &foundSeparator);
@@ -178,18 +186,11 @@ Reference<GCSBlobStoreEndpoint> GCSBlobStoreEndpoint::fromString(const std::stri
 		if (resourceFromURL != nullptr)
 			*resourceFromURL = resource.toString();
 
-		// Load credentials from environment variable if available
-		Credentials creds;
-		const char* credsPath = getenv("GCS_CREDENTIALS_FILE");
-		if (credsPath) {
-			std::string credsFile = credsPath;
-			std::ifstream checkFile(credsFile);
-			if (checkFile.good()) {
-				creds = loadCredentialsFromFile(credsFile);
-			}
-		}
+		Optional<Credentials> creds;
+		if (cred.present())
+			creds = Credentials{ cred.get().toString()};
 
-		return makeReference<GCSBlobStoreEndpoint>(host.toString(), service.toString(), creds, knobs);
+		return makeReference<GCSBlobStoreEndpoint>(host.toString(), service.toString(),creds, knobs);
 
 	} catch (std::string& err) {
 		if (error != nullptr)
@@ -232,6 +233,63 @@ std::string GCSBlobStoreEndpoint::getResourceURL(std::string resource, std::stri
 
 	return r;
 }
+ACTOR Future<Void> updateSecret_impl(Reference<GCSBlobStoreEndpoint> b) {
+	std::vector<std::string>* pFiles = (std::vector<std::string>*)g_network->global(INetwork::enBlobCredentialFiles);
+	if (pFiles == nullptr)
+		return Void();
+
+	if (!b->credentials.present()) {
+		return Void();
+	}
+
+	state std::vector<Future<Optional<json_spirit::mObject>>> reads;
+	for (auto& f : *pFiles)
+		reads.push_back(tryReadJSONFile(f));
+
+	wait(waitForAll(reads));
+
+	std::string credentialsFileKey = "@" + b->host;
+
+	int invalid = 0;
+	TraceEvent("GCSBlobStoreEndpointReadingSecrets");
+
+	for (auto& f : reads) {
+		// If value not present then the credentials file wasn't readable or valid.  Continue to check other results.
+		if (!f.get().present()) {
+			++invalid;
+			continue;
+		}
+
+		JSONDoc doc(f.get().get());
+		if (doc.has("accounts") && doc.last().type() == json_spirit::obj_type) {
+			JSONDoc accounts(doc.last().get_obj());
+			if (accounts.has(credentialsFileKey, false) && accounts.last().type() == json_spirit::obj_type) {
+				JSONDoc account(accounts.last());
+				GCSBlobStoreEndpoint::Credentials creds = b->credentials.get();
+				std::string token;
+				if (account.tryGet("token", token)) {
+					creds.token = token;
+					b->credentials = creds;
+					TraceEvent("GCSBlobStoreEndpointUpdatedSecret")
+						.detail("Token", token);
+					return Void();
+				}
+			}
+		}
+	}
+
+	// If any sources were invalid
+	if (invalid > 0)
+		throw backup_auth_unreadable();
+
+	// All sources were valid but didn't contain the desired info
+	throw backup_auth_missing();
+}
+
+Future<Void> GCSBlobStoreEndpoint::updateSecret() {
+	return updateSecret_impl(Reference<GCSBlobStoreEndpoint>::addRef(this));
+}
+
 
 ACTOR Future<GCSBlobStoreEndpoint::ReusableConnection> connect_impl(Reference<GCSBlobStoreEndpoint> b,
                                                                    bool* reusingConn) {
@@ -265,6 +323,11 @@ ACTOR Future<GCSBlobStoreEndpoint::ReusableConnection> connect_impl(Reference<GC
 	bool isTLS = b->knobs.isTLS();
 	state Reference<IConnection> conn;
 
+	TraceEvent("GCSBlobStoreEndpointNewConnectionAttempt")
+		.detail("Host", host)
+		.detail("Service", service)
+		.detail("IsTLS", isTLS);
+
 	wait(store(conn, INetworkConnections::net()->connect(host, service, isTLS)));
 	wait(conn->connectHandshake());
 
@@ -272,6 +335,8 @@ ACTOR Future<GCSBlobStoreEndpoint::ReusableConnection> connect_impl(Reference<GC
 	    .suppressFor(60)
 	    .detail("RemoteEndpoint", conn->getPeerAddress())
 	    .detail("ExpiresIn", b->knobs.max_connection_life);
+
+	wait(b->updateSecret());
 
 	return GCSBlobStoreEndpoint::ReusableConnection({ conn, now() + b->knobs.max_connection_life });
 }
@@ -303,10 +368,6 @@ ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<GCSBlob
 	req->data.contentLen = contentLen;
 	req->data.headers = headers;
 	req->data.headers["Host"] = bstore->host;
-
-	if (!bstore->credentials.isEmpty()) {
-		req->data.headers["Authorization"] = "Bearer " + bstore->credentials.token;
-	}
 
 	if (resource.empty()) {
 		resource = "/";
@@ -355,6 +416,13 @@ ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<GCSBlob
 			connectionEstablished = true;
 			connID = rconn.conn->getDebugID();
 			reqStartTimer = g_network->timer();
+
+			// Finish/update the request headers
+			// This must be done AFTER the connection is ready because if credentials are coming from disk they are
+			// refreshed when a new connection is established and setAuthHeaders() would need the updated secret.
+			if (bstore->credentials.present()) {
+				req->data.headers["Authorization"] = "Bearer " + bstore->credentials.get().token;
+			}
 
 			wait(bstore->requestRate->getAllowance(1));
 
@@ -1067,37 +1135,6 @@ Future<GCSBlobStoreEndpoint::ListResult> GCSBlobStoreEndpoint::listObjects(
 	    Reference<GCSBlobStoreEndpoint>::addRef(this), bucket, prefix, delimiter, maxDepth, recurseFilter);
 }
 
-GCSBlobStoreEndpoint::Credentials GCSBlobStoreEndpoint::loadCredentialsFromFile(std::string const& filename) {
-	try {
-		std::ifstream file(filename);
-		if (!file.is_open())
-			throw io_error();
-
-		std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-		json_spirit::mValue json;
-		json_spirit::read_string(content, json);
-
-		if (json.type() != json_spirit::obj_type)
-			throw http_bad_response();
-
-		json_spirit::mObject obj = json.get_obj();
-		Credentials creds;
-
-		auto tokenIt = obj.find("token");
-		if (tokenIt != obj.end() && tokenIt->second.type() == json_spirit::str_type)
-			creds.token = tokenIt->second.get_str();
-
-		return creds;
-	} catch (Error& e) {
-		TraceEvent(SevWarn, "GCSCredentialLoadFailed").error(e).detail("File", filename);
-		throw;
-	} catch (std::exception& e) {
-		TraceEvent(SevWarn, "GCSCredentialLoadFailed").detail("File", filename).detail("Error", e.what());
-		throw io_error();
-	}
-}
-
 // Test configuration helpers
 namespace {
 	struct GCSTestConfig {
@@ -1122,7 +1159,6 @@ namespace {
 					config.host = "storage.googleapis.com";
 					config.service = "443";
 					config.bucket = "palantir-foundationdb-gcp-dev";
-					config.credentials = GCSBlobStoreEndpoint::loadCredentialsFromFile(credsFile);
 					config.knobs.secure_connection = 1;
 					TraceEvent("GCSTestConfig").detail("Mode", "RealGCP").detail("Bucket", config.bucket);
 					return config;

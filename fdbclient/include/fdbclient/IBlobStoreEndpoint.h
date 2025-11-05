@@ -23,6 +23,7 @@
 #include <map>
 #include <vector>
 #include "flow/flow.h"
+#include "fdbclient/JSONDoc.h"
 
 class UnsentPacketQueue;
 
@@ -155,6 +156,9 @@ public:
 	// Get a normalized version of this URL with the given resource and any non-default BlobKnob values as URL
 	// parameters in addition to the passed params string
 	virtual std::string getResourceURL(std::string resource, std::string params) const = 0;
+	virtual Future<Void> updateSecret() = 0;
 
 	BlobKnobs knobs;
 };
+
+Future<Optional<json_spirit::mObject>> tryReadJSONFile(std::string path);
