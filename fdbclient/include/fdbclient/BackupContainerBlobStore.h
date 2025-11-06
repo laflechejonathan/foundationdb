@@ -26,15 +26,6 @@
 #include "fdbclient/BackupContainerFileSystem.h"
 #include "fdbclient/IBlobStoreEndpoint.h"
 
-inline void validateBackupUrl(const std::string& resource) {
-	if (resource.empty())
-		throw backup_invalid_url();
-
-	for (auto c : resource)
-		if (!isalnum(c) && c != '_' && c != '-' && c != '.' && c != '/')
-			throw backup_invalid_url();
-}
-
 class BackupContainerBlobStore final : public BackupContainerFileSystem,
                                          ReferenceCounted<IBlobStoreEndpoint> {
 	Reference<IBlobStoreEndpoint> m_bstore;
@@ -67,6 +58,8 @@ public:
 
 	static Future<std::vector<std::string>> listURLs(Reference<IBlobStoreEndpoint> bstore, const std::string& bucket);
 
+	static void validateBackupUrl(const std::string& resource);
+
 	Future<Reference<IBackupFile>> writeFile(const std::string& path) final;
 
 	Future<Void> writeEntireFile(const std::string& path, const std::string& contents) final;
@@ -83,6 +76,8 @@ public:
 	Future<Void> deleteContainer(int* pNumDeleted) final;
 
 	std::string getBucket() const;
+
+
 };
 
 #endif

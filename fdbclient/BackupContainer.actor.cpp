@@ -295,7 +295,7 @@ Reference<IBackupContainer> IBackupContainer::openContainer(const std::string& u
 			} else {
 				bstore = S3BlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 			}
-			validateBackupUrl(resource);
+			BackupContainerBlobStore::validateBackupUrl(resource);
 			r = makeReference<BackupContainerBlobStore>(bstore, resource, backupParams, encryptionKeyFileName, true);
 		}
 #ifdef BUILD_AZURE_BACKUP

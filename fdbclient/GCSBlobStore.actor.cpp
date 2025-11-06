@@ -233,6 +233,7 @@ std::string GCSBlobStoreEndpoint::getResourceURL(std::string resource, std::stri
 
 	return r;
 }
+
 ACTOR Future<Void> updateSecret_impl(Reference<GCSBlobStoreEndpoint> b) {
 	std::vector<std::string>* pFiles = (std::vector<std::string>*)g_network->global(INetwork::enBlobCredentialFiles);
 	if (pFiles == nullptr)

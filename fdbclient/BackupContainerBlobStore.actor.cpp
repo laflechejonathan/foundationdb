@@ -239,3 +239,12 @@ Future<Void> BackupContainerBlobStore::deleteContainer(int* pNumDeleted) {
 std::string BackupContainerBlobStore::getBucket() const {
 	return m_bucket;
 }
+
+void BackupContainerBlobStore::validateBackupUrl(const std::string& resource) {
+	if (resource.empty())
+		throw backup_invalid_url();
+
+	for (auto c : resource)
+		if (!isalnum(c) && c != '_' && c != '-' && c != '.' && c != '/')
+			throw backup_invalid_url();
+}
