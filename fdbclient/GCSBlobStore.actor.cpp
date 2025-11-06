@@ -140,8 +140,6 @@ std::string GCSBlobStoreEndpoint::canonicalizeURI(const std::string& resource, s
 	size_t q = canonicalURI.find_last_of('?');
 	if (q != canonicalURI.npos) {
 		canonicalURI.resize(q);
-	} else {
-		canonicalURI = HTTP::urlEncode(canonicalURI);
 	}
 
 	// Create the canonical query string
@@ -155,7 +153,7 @@ std::string GCSBlobStoreEndpoint::canonicalizeURI(const std::string& resource, s
 	while ((queryParameter = qStr.eat("&")) != StringRef()) {
 		StringRef param = queryParameter.eat("=");
 		StringRef value = queryParameter.eat();
-		queryParameters.push_back(HTTP::urlEncode(param.toString()) + "=" + HTTP::urlEncode(value.toString()));
+		queryParameters.push_back(param.toString() + "=" + value.toString());
 	}
 
 	return canonicalURI;
