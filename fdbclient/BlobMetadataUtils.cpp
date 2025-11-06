@@ -44,7 +44,7 @@ std::string buildPartitionPath(const std::string& url, const std::string& partit
 		std::string urlCopy = url;
 
         if (GCSBlobStoreEndpoint::isGCSURL(url)) {
-            GCSBlobStoreEndpoint::fromString(url, &resource, &lastOpenError, &backupParams);
+            GCSBlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
         } else {
             S3BlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
         }

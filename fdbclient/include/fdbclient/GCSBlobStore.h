@@ -79,28 +79,15 @@ public:
 	static std::unique_ptr<BlobStats> blobStats;
 	static Future<Void> statsLogger;
 
-	void maybeStartStatsLogger();
-
 	GCSBlobStoreEndpoint(std::string const& host,
-	                     std::string const& service,
-	                     Optional<Credentials> const& credentials,
-	                     BlobKnobs const& knobs = BlobKnobs())
-	  : host(host), service(service), credentials(credentials), knobs(knobs),
-	    requestRate(new SpeedLimit(knobs.requests_per_second, 1)),
-	    requestRateList(new SpeedLimit(knobs.list_requests_per_second, 1)),
-	    requestRateWrite(new SpeedLimit(knobs.write_requests_per_second, 1)),
-	    requestRateRead(new SpeedLimit(knobs.read_requests_per_second, 1)),
-	    requestRateDelete(new SpeedLimit(knobs.delete_requests_per_second, 1)),
-	    sendRate(new SpeedLimit(knobs.max_send_bytes_per_second, 1)),
-	    recvRate(new SpeedLimit(knobs.max_recv_bytes_per_second, 1)),
-	    concurrentRequests(knobs.concurrent_requests),
-	    concurrentUploads(knobs.concurrent_uploads),
-	    concurrentLists(knobs.concurrent_lists) {
-		if (host.empty())
-			throw connection_string_invalid();
-
-		connectionPool = makeReference<ConnectionPoolData>();
-		maybeStartStatsLogger();
+	                    std::string const& service,
+	                    Optional<std::string> const& proxyHost,
+	                    Optional<std::string> const& proxyPort,
+	                    Optional<Credentials> const& creds,
+	                    BlobKnobs const& knobs = BlobKnobs(),
+	                    HTTP::Headers extraHeaders = HTTP::Headers())
+	  : IBlobStoreEndpoint(host, service, "auto", proxyHost, proxyPort, knobs, extraHeaders), credentials(creds),
+	    lookupToken(creds.present() && creds.get().token.empty()) {
 	}
 
 	static std::string getURLFormat(bool withResource = false) {
@@ -117,42 +104,28 @@ public:
 	// If the url has parameters that GCSBlobStoreEndpoint can't consume then an error will be thrown unless
 	// ignored_parameters is given in which case the unconsumed parameters will be added to it.
 	static Reference<GCSBlobStoreEndpoint> fromString(const std::string& url,
-													   std::string* resourceFromURL,
-													   std::string* error,
-													   ParametersT* ignored_parameters);
+	                                                 const Optional<std::string>& proxy,
+	                                                 std::string* resourceFromURL,
+	                                                 std::string* error,
+	                                                 ParametersT* ignored_parameters);
 
 	// Get a normalized version of this URL with the given resource and any non-default BlobKnob values as URL
 	// parameters in addition to the passed params string
 	std::string getResourceURL(std::string resource, std::string params) const override;
 
+	std::string canonicalizeURI(const std::string& resource, std::vector<std::string>& queryParameters)  override;
+
 	static Credentials loadCredentialsFromFile(std::string const& filename);
 
-	std::string host;
-	std::string service;
 	Optional<Credentials> credentials;
-	BlobKnobs knobs;
+	bool lookupToken;
 
-	Reference<ConnectionPoolData> connectionPool;
-	Reference<IRateControl> requestRate;
-	Reference<IRateControl> requestRateList;
-	Reference<IRateControl> requestRateWrite;
-	Reference<IRateControl> requestRateRead;
-	Reference<IRateControl> requestRateDelete;
-	Reference<IRateControl> sendRate;
-	Reference<IRateControl> recvRate;
-	FlowLock concurrentRequests;
-	FlowLock concurrentUploads;
-	FlowLock concurrentLists;
-
-	Future<ReusableConnection> connect(bool* reusingConn);
-	void returnConnection(ReusableConnection& conn);
-	Future<Reference<HTTP::IncomingResponse>> doRequest(std::string const& verb,
-	                                                    std::string const& resource,
-	                                                    const HTTP::Headers& headers,
-	                                                    UnsentPacketQueue* pContent,
-	                                                    int contentLen,
-	                                                    std::set<unsigned int> successCodes);
 	Future<Void> updateSecret() override;
+	void setAllAuthHeaders(const std::string& verb,
+						  const std::string& resource,
+						  HTTP::Headers& headers,
+						  std::string date = "",
+						  std::string datestamp = "") override;
 
 	// IBlobStoreEndpoint virtual method overrides
 	Future<bool> bucketExists(std::string const& bucket) override;

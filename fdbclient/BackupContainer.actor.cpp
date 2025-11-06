@@ -291,7 +291,7 @@ Reference<IBackupContainer> IBackupContainer::openContainer(const std::string& u
 
 			// Check if this is a GCS URL by looking for gcs=1 parameter
 			if (GCSBlobStoreEndpoint::isGCSURL(url)) {
-				bstore = GCSBlobStoreEndpoint::fromString(url, &resource, &lastOpenError, &backupParams);
+				bstore = GCSBlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 			} else {
 				bstore = S3BlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 			}
@@ -383,7 +383,7 @@ ACTOR Future<std::vector<std::string>> listContainers_impl(std::string baseURL, 
 			// Check if this is a GCS URL by looking for gcs=1 parameter
 			if (GCSBlobStoreEndpoint::isGCSURL(baseURL)) {
 				bstore = GCSBlobStoreEndpoint::fromString(
-				    baseURL, &resource, &IBackupContainer::lastOpenError, &backupParams);
+				    baseURL, proxy, &resource, &IBackupContainer::lastOpenError, &backupParams);
 			} else {
 				bstore = S3BlobStoreEndpoint::fromString(
 				    baseURL, proxy, &resource, &IBackupContainer::lastOpenError, &backupParams);

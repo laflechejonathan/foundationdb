@@ -1659,17 +1659,17 @@ Reference<BackupContainerFileSystem> BackupContainerFileSystem::openContainerFS(
 			// The URL parameters contain blobstore endpoint tunables as well as possible backup-specific options.
 			IBlobStoreEndpoint::ParametersT backupParams;
 			Reference<IBlobStoreEndpoint> bstore;
+			Optional<std::string> blobstoreProxy;
+			if (proxy.present()) {
+				blobstoreProxy = proxy.get();
+			} else if (fileBackupAgentProxy.present()) {
+				blobstoreProxy = fileBackupAgentProxy.get();
+			}
 
 			// Check if this is a GCS URL by looking for gcs=1 parameter
 			if (GCSBlobStoreEndpoint::isGCSURL(url)) {
-				bstore = GCSBlobStoreEndpoint::fromString(url, &resource, &lastOpenError, &backupParams);
+				bstore = GCSBlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 			} else {
-				Optional<std::string> blobstoreProxy;
-				if (proxy.present()) {
-					blobstoreProxy = proxy.get();
-				} else if (fileBackupAgentProxy.present()) {
-					blobstoreProxy = fileBackupAgentProxy.get();
-				}
 				bstore = S3BlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 			}
 

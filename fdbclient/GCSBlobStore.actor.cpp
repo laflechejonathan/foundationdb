@@ -28,46 +28,7 @@
 
 #include "flow/actorcompiler.h" // has to be last include
 
-GCSBlobStoreEndpoint::Stats GCSBlobStoreEndpoint::Stats::operator-(const Stats& rhs) {
-	Stats r;
-	r.requests_failed = requests_failed - rhs.requests_failed;
-	r.requests_successful = requests_successful - rhs.requests_successful;
-	r.bytes_sent = bytes_sent - rhs.bytes_sent;
-	return r;
-}
-
-json_spirit::mObject GCSBlobStoreEndpoint::Stats::getJSON() {
-	json_spirit::mObject o;
-	o["requests_failed"] = requests_failed;
-	o["requests_successful"] = requests_successful;
-	o["bytes_sent"] = bytes_sent;
-	return o;
-}
-
-GCSBlobStoreEndpoint::Stats GCSBlobStoreEndpoint::s_stats;
-std::unique_ptr<GCSBlobStoreEndpoint::BlobStats> GCSBlobStoreEndpoint::blobStats;
-Future<Void> GCSBlobStoreEndpoint::statsLogger = Never();
-
-GCSBlobStoreEndpoint::BlobStats::BlobStats()
-  : id(deterministicRandom()->randomUniqueID()), cc("GCSBlobStoreStats", id.toString()),
-    requestsSuccessful("RequestsSuccessful", cc), requestsFailed("RequestsFailed", cc),
-    newConnections("NewConnections", cc), expiredConnections("ExpiredConnections", cc),
-    reusedConnections("ReusedConnections", cc), fastRetries("FastRetries", cc),
-    requestLatency("GCSBlobStoreRequestLatency",
-                   id,
-                   CLIENT_KNOBS->BLOBSTORE_LATENCY_LOGGING_INTERVAL,
-                   CLIENT_KNOBS->BLOBSTORE_LATENCY_LOGGING_ACCURACY) {}
-
-void GCSBlobStoreEndpoint::maybeStartStatsLogger() {
-	if (!blobStats && CLIENT_KNOBS->BLOBSTORE_ENABLE_LOGGING) {
-		blobStats = std::make_unique<BlobStats>();
-		statsLogger = blobStats->cc.traceCounters(
-		    "GCSBlobStoreMetrics", blobStats->id, CLIENT_KNOBS->BLOBSTORE_STATS_LOGGING_INTERVAL, "GCSBlobStoreMetrics");
-	}
-}
-
-// Check if a URL contains the gcs=1 parameter
-static bool hasGCSParameter(const std::string& url) {
+bool GCSBlobStoreEndpoint::isGCSURL(const std::string& url) {
 	size_t pos = url.find('?');
 	if (pos == std::string::npos) {
 		return false;
@@ -97,14 +58,11 @@ static bool hasGCSParameter(const std::string& url) {
 	return false;
 }
 
-bool GCSBlobStoreEndpoint::isGCSURL(const std::string& url) {
-	return hasGCSParameter(url);
-}
-
 Reference<GCSBlobStoreEndpoint> GCSBlobStoreEndpoint::fromString(const std::string& url,
+                                                                 const Optional<std::string>& proxy,
                                                                   std::string* resourceFromURL,
                                                                   std::string* error,
-                                                                  IBlobStoreEndpoint::ParametersT* ignored_parameters) {
+                                                                  ParametersT* ignoredParameters) {
 	if (resourceFromURL)
 		resourceFromURL->clear();
 
@@ -114,6 +72,9 @@ Reference<GCSBlobStoreEndpoint> GCSBlobStoreEndpoint::fromString(const std::stri
 		// Accept blobstore:// URLs with &gcs=1 parameter
 		if (prefix != "blobstore"_sr)
 			throw format("Invalid URL prefix '%s'", prefix.toString().c_str());
+
+		Optional<std::string> proxyHost, proxyPort;
+		parseProxy(proxy, proxyHost, proxyPort);
 
 		// Check for credentials before @ symbol (similar to S3)
 		// The credential can be empty (just "@") which indicates to look up credentials from file
@@ -139,49 +100,16 @@ Reference<GCSBlobStoreEndpoint> GCSBlobStoreEndpoint::fromString(const std::stri
 		StringRef service = h.eat();
 
 		BlobKnobs knobs;
+		std::string region;
 		bool isGCS = false;
-		while (1) {
-			StringRef name = t.eat("=");
-			if (name.size() == 0)
-				break;
-			StringRef value = t.eat("&");
-
-			// Check for gcs parameter
-			if (name == "gcs"_sr) {
-				if (value == "1"_sr) {
-					isGCS = true;
-				}
-				continue;
-			}
-
-			// See if the parameter is a knob
-			bool known = knobs.set(name, 0);
-
-			// If the parameter is not known to GCSBlobStoreEndpoint then throw unless there is an ignored_parameters set
-			// to add it to
-			if (!known) {
-				if (ignored_parameters == nullptr) {
-					throw format("%s is not a valid parameter name", name.toString().c_str());
-				}
-				(*ignored_parameters)[name.toString()] = value.toString();
-				continue;
-			}
-
-			// The parameter is known to GCSBlobStoreEndpoint so it must be numeric and valid.
-			char* valueEnd = nullptr;
-			std::string s = value.toString();
-			long int ivalue = strtol(s.c_str(), &valueEnd, 10);
-			if (*valueEnd || (ivalue == 0 && s != "0") ||
-			    (((ivalue == LONG_MAX) || (ivalue == LONG_MIN)) && errno == ERANGE))
-				throw format("%s is not a valid value for %s", s.c_str(), name.toString().c_str());
-
-			// It should not be possible for this set to fail now since the dummy set above had to have worked.
-			ASSERT(knobs.set(name, ivalue));
-		}
+		HTTP::Headers extraHeaders;
+		parseQueryParams(t, knobs, extraHeaders, region, isGCS, ignoredParameters);
 
 		// Validate that gcs=1 parameter was present
 		if (!isGCS)
 			throw std::string("gcs=1 parameter is required in URL");
+		if (!region.empty())
+			throw std::string("region parameter is not supported with GCS");
 
 		if (resourceFromURL != nullptr)
 			*resourceFromURL = resource.toString();
@@ -190,7 +118,8 @@ Reference<GCSBlobStoreEndpoint> GCSBlobStoreEndpoint::fromString(const std::stri
 		if (cred.present())
 			creds = Credentials{ cred.get().toString()};
 
-		return makeReference<GCSBlobStoreEndpoint>(host.toString(), service.toString(),creds, knobs);
+		return makeReference<GCSBlobStoreEndpoint>(
+		    host.toString(), service.toString(), proxyHost, proxyPort, creds, knobs, extraHeaders);
 
 	} catch (std::string& err) {
 		if (error != nullptr)
@@ -202,6 +131,34 @@ Reference<GCSBlobStoreEndpoint> GCSBlobStoreEndpoint::fromString(const std::stri
 		    .detail("URL", url);
 		throw backup_invalid_url();
 	}
+}
+
+std::string GCSBlobStoreEndpoint::canonicalizeURI(const std::string& resource, std::vector<std::string>& queryParameters) {
+	StringRef resourceRef(resource);
+	resourceRef.eat("/");
+	std::string canonicalURI("/" + resourceRef.toString());
+	size_t q = canonicalURI.find_last_of('?');
+	if (q != canonicalURI.npos) {
+		canonicalURI.resize(q);
+	} else {
+		canonicalURI = HTTP::urlEncode(canonicalURI);
+	}
+
+	// Create the canonical query string
+	std::string queryString;
+	q = resource.find_last_of('?');
+	if (q != queryString.npos)
+		queryString = resource.substr(q + 1);
+
+	StringRef qStr(queryString);
+	StringRef queryParameter;
+	while ((queryParameter = qStr.eat("&")) != StringRef()) {
+		StringRef param = queryParameter.eat("=");
+		StringRef value = queryParameter.eat();
+		queryParameters.push_back(HTTP::urlEncode(param.toString()) + "=" + HTTP::urlEncode(value.toString()));
+	}
+
+	return canonicalURI;
 }
 
 std::string GCSBlobStoreEndpoint::getResourceURL(std::string resource, std::string params) const {
@@ -235,13 +192,12 @@ std::string GCSBlobStoreEndpoint::getResourceURL(std::string resource, std::stri
 }
 
 ACTOR Future<Void> updateSecret_impl(Reference<GCSBlobStoreEndpoint> b) {
+	if (!b->lookupToken)
+		return Void();
+
 	std::vector<std::string>* pFiles = (std::vector<std::string>*)g_network->global(INetwork::enBlobCredentialFiles);
 	if (pFiles == nullptr)
 		return Void();
-
-	if (!b->credentials.present()) {
-		return Void();
-	}
 
 	state std::vector<Future<Optional<json_spirit::mObject>>> reads;
 	for (auto& f : *pFiles)
@@ -291,269 +247,15 @@ Future<Void> GCSBlobStoreEndpoint::updateSecret() {
 	return updateSecret_impl(Reference<GCSBlobStoreEndpoint>::addRef(this));
 }
 
-
-ACTOR Future<GCSBlobStoreEndpoint::ReusableConnection> connect_impl(Reference<GCSBlobStoreEndpoint> b,
-                                                                   bool* reusingConn) {
-	*reusingConn = false;
-
-	// Try to get a connection from the pool
-	while (!b->connectionPool->pool.empty()) {
-		GCSBlobStoreEndpoint::ReusableConnection rconn = b->connectionPool->pool.front();
-		b->connectionPool->pool.pop();
-
-		if (rconn.expirationTime > now()) {
-			*reusingConn = true;
-			++b->blobStats->reusedConnections;
-			TraceEvent("GCSBlobStoreEndpointReusingConnection")
-			    .suppressFor(60)
-			    .detail("RemoteEndpoint", rconn.conn->getPeerAddress())
-			    .detail("ExpiresIn", rconn.expirationTime - now());
-			return rconn;
-		}
-		++b->blobStats->expiredConnections;
-	}
-
-	++b->blobStats->newConnections;
-	state std::string host = b->host;
-	state std::string service = b->service;
-
-	if (service.empty()) {
-		service = b->knobs.secure_connection ? "https" : "http";
-	}
-
-	bool isTLS = b->knobs.isTLS();
-	state Reference<IConnection> conn;
-
-	TraceEvent("GCSBlobStoreEndpointNewConnectionAttempt")
-		.detail("Host", host)
-		.detail("Service", service)
-		.detail("IsTLS", isTLS);
-
-	wait(store(conn, INetworkConnections::net()->connect(host, service, isTLS)));
-	wait(conn->connectHandshake());
-
-	TraceEvent("GCSBlobStoreEndpointNewConnection")
-	    .suppressFor(60)
-	    .detail("RemoteEndpoint", conn->getPeerAddress())
-	    .detail("ExpiresIn", b->knobs.max_connection_life);
-
-	wait(b->updateSecret());
-
-	return GCSBlobStoreEndpoint::ReusableConnection({ conn, now() + b->knobs.max_connection_life });
-}
-
-Future<GCSBlobStoreEndpoint::ReusableConnection> GCSBlobStoreEndpoint::connect(bool* reusing) {
-	return connect_impl(Reference<GCSBlobStoreEndpoint>::addRef(this), reusing);
-}
-
-void GCSBlobStoreEndpoint::returnConnection(ReusableConnection& rconn) {
-	if (rconn.expirationTime > now()) {
-		connectionPool->pool.push(rconn);
-	} else {
-		++blobStats->expiredConnections;
-	}
-	rconn.conn = Reference<IConnection>();
-}
-
-ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<GCSBlobStoreEndpoint> bstore,
-                                                               std::string verb,
-                                                               std::string resource,
-                                                               HTTP::Headers headers,
-                                                               UnsentPacketQueue* pContent,
-                                                               int contentLen,
-                                                               std::set<unsigned int> successCodes) {
-	state UnsentPacketQueue contentCopy;
-	state Reference<HTTP::OutgoingRequest> req = makeReference<HTTP::OutgoingRequest>();
-	req->verb = verb;
-	req->data.content = &contentCopy;
-	req->data.contentLen = contentLen;
-	req->data.headers = headers;
-	req->data.headers["Host"] = bstore->host;
-
-	if (resource.empty()) {
-		resource = "/";
-	}
-	req->resource = resource;
-
-	int bandwidthThisRequest = 1 + bstore->knobs.max_send_bytes_per_second / bstore->knobs.concurrent_uploads;
-	int contentUploadSeconds = contentLen / bandwidthThisRequest;
-	state int requestTimeout = std::max(bstore->knobs.request_timeout_min, 3 * contentUploadSeconds);
-
-	wait(bstore->concurrentRequests.take());
-	state FlowLock::Releaser globalReleaser(bstore->concurrentRequests, 1);
-
-	state int maxTries = std::min(bstore->knobs.request_tries, bstore->knobs.connect_tries);
-	state int thisTry = 1;
-	state double nextRetryDelay = 2.0;
-
-	loop {
-		state Optional<Error> err;
-		state Reference<HTTP::IncomingResponse> r;
-		state bool connectionEstablished = false;
-		state UID connID = UID();
-		state double reqStartTimer;
-		state double connectStartTimer = g_network->timer();
-		state bool reusingConn = false;
-		state bool fastRetry = false;
-
-		try {
-			// Copy content if needed
-			req->data.content->discardAll();
-			if (pContent != nullptr) {
-				PacketBuffer* pFirst = pContent->getUnsent();
-				PacketBuffer* pLast = nullptr;
-				for (PacketBuffer* p = pFirst; p != nullptr; p = p->nextPacketBuffer()) {
-					p->addref();
-					p->bytes_sent = 0;
-					pLast = p;
-				}
-				req->data.content->prependWriteBuffer(pFirst, pLast);
-			}
-
-			// Connect
-			Future<GCSBlobStoreEndpoint::ReusableConnection> frconn = bstore->connect(&reusingConn);
-			state GCSBlobStoreEndpoint::ReusableConnection rconn =
-			    wait(timeoutError(frconn, bstore->knobs.connect_timeout));
-			connectionEstablished = true;
-			connID = rconn.conn->getDebugID();
-			reqStartTimer = g_network->timer();
-
-			// Finish/update the request headers
-			// This must be done AFTER the connection is ready because if credentials are coming from disk they are
-			// refreshed when a new connection is established and setAuthHeaders() would need the updated secret.
-			if (bstore->credentials.present()) {
-				req->data.headers["Authorization"] = "Bearer " + bstore->credentials.get().token;
-			}
-
-			wait(bstore->requestRate->getAllowance(1));
-
-			// Do request
-			Future<Reference<HTTP::IncomingResponse>> reqF =
-			    HTTP::doRequest(rconn.conn, req, bstore->sendRate, &bstore->s_stats.bytes_sent, bstore->recvRate);
-
-			if (reqF.isReady() && reusingConn) {
-				fastRetry = true;
-			}
-
-			Reference<HTTP::IncomingResponse> _r = wait(timeoutError(reqF, requestTimeout));
-			r = _r;
-
-			if (r->data.headers["Connection"] != "close") {
-				bstore->returnConnection(rconn);
-			} else {
-				++bstore->blobStats->expiredConnections;
-			}
-			rconn.conn.clear();
-
-		} catch (Error& e) {
-			if (e.code() == error_code_actor_cancelled)
-				throw;
-			err = e;
-		}
-
-		double end = g_network->timer();
-		double connectDuration = reqStartTimer - connectStartTimer;
-		double reqDuration = end - reqStartTimer;
-		bstore->blobStats->requestLatency.addMeasurement(reqDuration);
-
-		if (!err.present() && successCodes.count(r->code) != 0) {
-			bstore->s_stats.requests_successful++;
-			++bstore->blobStats->requestsSuccessful;
-			return r;
-		}
-
-		bstore->s_stats.requests_failed++;
-		++bstore->blobStats->requestsFailed;
-
-		bool retryable = err.present() || (r && (r->code == 500 || r->code == 502 || r->code == 503 || r->code == 429));
-		retryable = retryable && (thisTry < maxTries);
-
-		if (!retryable || !err.present()) {
-			fastRetry = false;
-		}
-
-		TraceEvent event(SevWarn,
-		                 retryable ? (fastRetry ? "GCSBlobStoreEndpointRequestFailedFastRetryable"
-		                                        : "GCSBlobStoreEndpointRequestFailedRetryable")
-		                           : "GCSBlobStoreEndpointRequestFailed");
-
-		bool connectionFailed = false;
-		if (err.present()) {
-			event.errorUnsuppressed(err.get());
-			if (err.get().code() == error_code_connection_failed) {
-				connectionFailed = true;
-			}
-		}
-		event.suppressFor(60);
-		if (!err.present()) {
-			event.detail("ResponseCode", r->code);
-		}
-
-		event.detail("ConnectionEstablished", connectionEstablished);
-		event.detail("ReusingConn", reusingConn);
-		if (connectionEstablished) {
-			event.detail("ConnID", connID);
-			event.detail("ConnectDuration", connectDuration);
-			event.detail("ReqDuration", reqDuration);
-		}
-
-		event.detail("Verb", verb).detail("Resource", resource).detail("ThisTry", thisTry);
-
-		if (!fastRetry && (!r || r->code != 429))
-			++thisTry;
-
-		if (fastRetry) {
-			++bstore->blobStats->fastRetries;
-			wait(delay(0));
-		} else if (retryable) {
-			double delay = nextRetryDelay;
-			double limit =
-			    connectionFailed ? bstore->knobs.max_delay_connection_failed : bstore->knobs.max_delay_retryable_error;
-			nextRetryDelay = std::min(nextRetryDelay * 2, limit);
-
-			if (r) {
-				auto iRetryAfter = r->data.headers.find("Retry-After");
-				if (iRetryAfter != r->data.headers.end()) {
-					event.detail("RetryAfterHeader", iRetryAfter->second);
-					char* pEnd;
-					double retryAfter = strtod(iRetryAfter->second.c_str(), &pEnd);
-					if (*pEnd)
-						retryAfter = 300;
-					delay = std::max(delay, retryAfter);
-				}
-			}
-
-			event.detail("RetryDelay", delay);
-			wait(::delay(delay));
-		} else {
-			if (r && r->code == 404)
-				throw file_not_found();
-			if (r && r->code == 401)
-				throw http_auth_failed();
-			if (err.present()) {
-				int code = err.get().code();
-				if (code == error_code_timed_out && !connectionEstablished) {
-					throw connection_failed();
-				}
-				if (code == error_code_timed_out || code == error_code_connection_failed ||
-				    code == error_code_lookup_failed)
-					throw err.get();
-			}
-			throw http_request_failed();
-		}
+void GCSBlobStoreEndpoint::setAllAuthHeaders(const std::string& verb,
+					  const std::string& resource,
+					  HTTP::Headers& headers,
+					  std::string date,
+					  std::string datestamp) {
+	if (credentials.present()) {
+		headers["Authorization"] = "Bearer " + credentials.get().token;
 	}
 }
-
-Future<Reference<HTTP::IncomingResponse>> GCSBlobStoreEndpoint::doRequest(std::string const& verb,
-                                                                          std::string const& resource,
-                                                                          const HTTP::Headers& headers,
-                                                                          UnsentPacketQueue* pContent,
-                                                                          int contentLen,
-                                                                          std::set<unsigned int> successCodes) {
-	return doRequest_impl(
-	    Reference<GCSBlobStoreEndpoint>::addRef(this), verb, resource, headers, pContent, contentLen, successCodes);
-}
-
 ACTOR Future<int> readObject_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                   std::string bucket,
                                   std::string object,
@@ -1134,434 +836,4 @@ Future<GCSBlobStoreEndpoint::ListResult> GCSBlobStoreEndpoint::listObjects(
     std::function<bool(std::string const&)> recurseFilter) {
 	return listObjects_impl(
 	    Reference<GCSBlobStoreEndpoint>::addRef(this), bucket, prefix, delimiter, maxDepth, recurseFilter);
-}
-
-// Test configuration helpers
-namespace {
-	struct GCSTestConfig {
-		std::string host;
-		std::string service;
-		std::string bucket;
-		GCSBlobStoreEndpoint::Credentials credentials;
-		BlobKnobs knobs;
-
-		static GCSTestConfig getConfig() {
-			GCSTestConfig config;
-
-			// Check for GCP credentials file via environment variable or default path
-			const char* credsPath = getenv("GCS_CREDENTIALS_FILE");
-			std::string credsFile = credsPath ? credsPath : "";
-		    TraceEvent("GCSTestConfig").detail("credsPath", credsFile);
-
-			if (!credsFile.empty()) {
-				std::ifstream checkFile(credsFile);
-				if (checkFile.good()) {
-					// Use real GCP
-					config.host = "storage.googleapis.com";
-					config.service = "443";
-					config.bucket = "palantir-foundationdb-gcp-dev";
-					config.knobs.secure_connection = 1;
-					TraceEvent("GCSTestConfig").detail("Mode", "RealGCP").detail("Bucket", config.bucket);
-					return config;
-				}
-			}
-		    // Use local emulator
-		    config.host = "localhost";
-		    config.service = "9023";
-		    config.bucket = "test-bucket";
-		    config.knobs.secure_connection = 0;
-		    TraceEvent("GCSTestConfig").detail("Mode", "LocalEmulator").detail("Bucket", config.bucket);
-			return config;
-		}
-	};
-
-	Reference<GCSBlobStoreEndpoint> makeTestEndpoint() {
-		GCSTestConfig config = GCSTestConfig::getConfig();
-		return makeReference<GCSBlobStoreEndpoint>(config.host, config.service, config.credentials, config.knobs);
-	}
-
-	std::string getTestBucket() {
-		return GCSTestConfig::getConfig().bucket;
-	}
-} // namespace
-
-TEST_CASE("/fdbclient/gcsblobstore/readobject") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::vector<uint8_t> buffer;
-	buffer.resize(1024);
-
-	TraceEvent("GCSBlobStoreTest_Starting")
-		.detail("Host", gcs->host)
-		.detail("Service", gcs->service);
-
-	state std::string object = "blob1";
-
-	state int bytesRead = wait(gcs->readObject(bucket, object, buffer.data(), buffer.size(), 0));
-
-	TraceEvent("GCSBlobStoreTest_ReadSuccess")
-		.detail("Bucket", bucket)
-		.detail("Object", object)
-		.detail("BytesRead", bytesRead);
-
-	ASSERT(bytesRead > 0);
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/objectexists") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string object = "blob1";
-
-	state bool exists = wait(gcs->objectExists(bucket, object));
-
-	TraceEvent("GCSBlobStoreTest_ObjectExists")
-	    .detail("Bucket", bucket)
-	    .detail("Object", object)
-	    .detail("Exists", exists);
-
-	ASSERT(exists);
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/objectsize") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string object = "blob1";
-
-	state int64_t size = wait(gcs->objectSize(bucket, object));
-
-	TraceEvent("GCSBlobStoreTest_ObjectSize")
-	    .detail("Bucket", bucket)
-	    .detail("Object", object)
-	    .detail("Size", size);
-
-	ASSERT(size > 0);
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/writeandread") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string object = "test-write-" + deterministicRandom()->randomUniqueID().shortString();
-	state std::string content = "Hello from FoundationDB GCS test!";
-
-	TraceEvent("GCSBlobStoreTest_WriteStart").detail("Bucket", bucket).detail("Object", object);
-
-	wait(gcs->writeEntireFile(bucket, object, content));
-
-	TraceEvent("GCSBlobStoreTest_WriteComplete").detail("Object", object);
-
-	state std::vector<uint8_t> buffer;
-	buffer.resize(1024);
-
-	state int bytesRead = wait(gcs->readObject(bucket, object, buffer.data(), buffer.size(), 0));
-
-	TraceEvent("GCSBlobStoreTest_ReadComplete").detail("Object", object).detail("BytesRead", bytesRead);
-
-	ASSERT(bytesRead == content.size());
-	ASSERT(memcmp(buffer.data(), content.data(), bytesRead) == 0);
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/integrationtest") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string object = "integration-test-" + deterministicRandom()->randomUniqueID().shortString();
-	state std::string content = "Integration test content for GCS BlobStore implementation";
-
-	TraceEvent("GCSIntegrationTest_Start").detail("Bucket", bucket).detail("Object", object);
-
-	// Step 1: Write file
-	TraceEvent("GCSIntegrationTest_Writing").detail("ContentSize", content.size());
-	wait(gcs->writeEntireFile(bucket, object, content));
-
-	// Step 2: Verify it exists
-	state bool exists = wait(gcs->objectExists(bucket, object));
-	TraceEvent("GCSIntegrationTest_ExistsCheck").detail("Exists", exists);
-	ASSERT(exists);
-
-	// Step 3: Verify size is reported accurately
-	state int64_t size = wait(gcs->objectSize(bucket, object));
-	TraceEvent("GCSIntegrationTest_SizeCheck").detail("ReportedSize", size).detail("ExpectedSize", content.size());
-	ASSERT(size == content.size());
-
-	// Step 4: Read file and verify contents
-	state std::vector<uint8_t> buffer;
-	buffer.resize(content.size() + 10);
-	state int bytesRead = wait(gcs->readObject(bucket, object, buffer.data(), buffer.size(), 0));
-	TraceEvent("GCSIntegrationTest_ReadCheck").detail("BytesRead", bytesRead);
-	ASSERT(bytesRead == content.size());
-	ASSERT(memcmp(buffer.data(), content.data(), bytesRead) == 0);
-
-	// Step 5: Delete the file
-	TraceEvent("GCSIntegrationTest_Deleting");
-	wait(gcs->deleteObject(bucket, object));
-
-	// Step 6: Verify it no longer exists
-	state bool existsAfterDelete = wait(gcs->objectExists(bucket, object));
-	TraceEvent("GCSIntegrationTest_ExistsAfterDelete").detail("Exists", existsAfterDelete);
-	ASSERT(!existsAfterDelete);
-
-	TraceEvent("GCSIntegrationTest_Success");
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/writefrombuffer") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string object = "written-from-fdb-cpp-" + deterministicRandom()->randomUniqueID().shortString();
-	state std::string content = "Testing writeEntireFileFromBuffer with MD5 checksum verification";
-
-	TraceEvent("GCSBufferTest_Start").detail("Bucket", bucket).detail("Object", object);
-
-	UnsentPacketQueue packets;
-	PacketWriter writer(packets.getWriteBuffer(content.size()), nullptr, Unversioned());
-	writer.serializeBytes(content);
-
-	state std::string contentMD5 = HTTP::computeMD5Sum(content);
-
-	TraceEvent("GCSBufferTest_Writing")
-	    .detail("ContentSize", content.size())
-	    .detail("MD5", contentMD5);
-
-	wait(gcs->writeEntireFileFromBuffer(bucket, object, &packets, content.size(), contentMD5));
-
-	state std::vector<uint8_t> buffer;
-	buffer.resize(content.size() + 10);
-	state int bytesRead = wait(gcs->readObject(bucket, object, buffer.data(), buffer.size(), 0));
-
-	TraceEvent("GCSBufferTest_Verification")
-	    .detail("BytesRead", bytesRead)
-	    .detail("ExpectedSize", content.size());
-
-	ASSERT(bytesRead == content.size());
-	ASSERT(memcmp(buffer.data(), content.data(), bytesRead) == 0);
-
-	// wait(gcs->deleteObject(bucket, object));
-
-	TraceEvent("GCSBufferTest_Success");
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/multipart") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string object = "multipart-" + deterministicRandom()->randomUniqueID().shortString();
-
-	state std::string part1Content = "Part 1: The quick brown fox ";
-	state std::string part2Content = "Part 2: jumps over the lazy dog";
-	state std::string expectedContent = part1Content + part2Content;
-
-	TraceEvent("GCSMultipartTest_Start").detail("Bucket", bucket).detail("Object", object);
-
-	state std::string uploadID = wait(gcs->beginMultiPartUpload(bucket, object));
-	TraceEvent("GCSMultipartTest_UploadStarted").detail("UploadID", uploadID);
-
-	UnsentPacketQueue packets1;
-	PacketWriter writer1(packets1.getWriteBuffer(part1Content.size()), nullptr, Unversioned());
-	writer1.serializeBytes(part1Content);
-	state std::string md5_1 = HTTP::computeMD5Sum(part1Content);
-
-	state std::string etag1 = wait(gcs->uploadPart(bucket, object, uploadID, 1, &packets1, part1Content.size(), md5_1));
-	TraceEvent("GCSMultipartTest_Part1Uploaded").detail("ETag", etag1);
-
-	UnsentPacketQueue packets2;
-	PacketWriter writer2(packets2.getWriteBuffer(part2Content.size()), nullptr, Unversioned());
-	writer2.serializeBytes(part2Content);
-	state std::string md5_2 = HTTP::computeMD5Sum(part2Content);
-
-	state std::string etag2 = wait(gcs->uploadPart(bucket, object, uploadID, 2, &packets2, part2Content.size(), md5_2));
-	TraceEvent("GCSMultipartTest_Part2Uploaded").detail("ETag", etag2);
-
-	state GCSBlobStoreEndpoint::MultiPartSetT parts;
-	parts[1] = etag1;
-	parts[2] = etag2;
-
-	wait(gcs->finishMultiPartUpload(bucket, object, uploadID, parts));
-	TraceEvent("GCSMultipartTest_Finalized");
-
-	state bool exists = wait(gcs->objectExists(bucket, object));
-	ASSERT(exists);
-
-	state std::vector<uint8_t> buffer;
-	buffer.resize(expectedContent.size() + 10);
-	state int bytesRead = wait(gcs->readObject(bucket, object, buffer.data(), buffer.size(), 0));
-
-	TraceEvent("GCSMultipartTest_Verification")
-	    .detail("BytesRead", bytesRead)
-	    .detail("ExpectedSize", expectedContent.size());
-
-	ASSERT(bytesRead == expectedContent.size());
-	ASSERT(memcmp(buffer.data(), expectedContent.data(), bytesRead) == 0);
-
-	wait(gcs->deleteObject(bucket, object));
-
-	TraceEvent("GCSMultipartTest_Success");
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/listobjects") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string prefix = "list-test-";
-	state std::string uniqueId = deterministicRandom()->randomUniqueID().shortString();
-
-	TraceEvent("GCSListTest_Start").detail("Bucket", bucket).detail("Prefix", prefix);
-
-	state std::vector<std::string> testObjects;
-	testObjects.push_back(prefix + uniqueId + "-file1.txt");
-	testObjects.push_back(prefix + uniqueId + "-file2.txt");
-	testObjects.push_back(prefix + uniqueId + "-subdir/file3.txt");
-
-	state int i;
-	for (i = 0; i < testObjects.size(); i++) {
-		std::string content = format("Content for %s", testObjects[i].c_str());
-		wait(gcs->writeEntireFile(bucket, testObjects[i], content));
-		TraceEvent("GCSListTest_ObjectCreated").detail("Object", testObjects[i]);
-	}
-
-	state GCSBlobStoreEndpoint::ListResult result =
-	    wait(gcs->listObjects(bucket, prefix + uniqueId, Optional<char>(), 0, nullptr));
-
-	TraceEvent("GCSListTest_Listed")
-	    .detail("ObjectCount", result.objects.size())
-	    .detail("PrefixCount", result.commonPrefixes.size());
-
-	ASSERT(result.objects.size() >= 2);
-
-	bool found1 = false, found2 = false;
-	for (const auto& obj : result.objects) {
-		TraceEvent("GCSListTest_FoundObject").detail("Name", obj.name).detail("Size", obj.size);
-		if (obj.name == testObjects[0])
-			found1 = true;
-		if (obj.name == testObjects[1])
-			found2 = true;
-	}
-	ASSERT(found1 && found2);
-
-	for (i = 0; i < testObjects.size(); i++) {
-		wait(gcs->deleteObject(bucket, testObjects[i]));
-	}
-
-	TraceEvent("GCSListTest_Success");
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/readentirefile") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string object = "readentire-" + deterministicRandom()->randomUniqueID().shortString();
-	state std::string content = "This is a test file for readEntireFile method";
-
-	TraceEvent("GCSReadEntireFileTest_Start").detail("Bucket", bucket).detail("Object", object);
-
-	wait(gcs->writeEntireFile(bucket, object, content));
-
-	state std::string readContent = wait(gcs->readEntireFile(bucket, object));
-
-	TraceEvent("GCSReadEntireFileTest_Verification")
-	    .detail("ExpectedSize", content.size())
-	    .detail("ActualSize", readContent.size());
-
-	ASSERT(readContent == content);
-
-	wait(gcs->deleteObject(bucket, object));
-
-	TraceEvent("GCSReadEntireFileTest_Success");
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/createbucket") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = "test-bucket-" + deterministicRandom()->randomUniqueID().shortString();
-
-	TraceEvent("GCSCreateBucketTest_Start").detail("Bucket", bucket);
-
-	wait(gcs->createBucket(bucket));
-
-	state bool exists = wait(gcs->bucketExists(bucket));
-
-	TraceEvent("GCSCreateBucketTest_Verification").detail("Exists", exists);
-
-	ASSERT(exists);
-
-	TraceEvent("GCSCreateBucketTest_Success");
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/listbuckets") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-
-	TraceEvent("GCSListBucketsTest_Start");
-
-	state std::vector<std::string> buckets = wait(gcs->listBuckets());
-
-	TraceEvent("GCSListBucketsTest_Listed").detail("BucketCount", buckets.size());
-
-	for (const auto& bucket : buckets) {
-		TraceEvent("GCSListBucketsTest_FoundBucket").detail("Name", bucket);
-	}
-
-	ASSERT(buckets.size() > 0);
-
-	TraceEvent("GCSListBucketsTest_Success");
-
-	return Void();
-}
-
-TEST_CASE("/fdbclient/gcsblobstore/deleterecursively") {
-	state Reference<GCSBlobStoreEndpoint> gcs = makeTestEndpoint();
-	state std::string bucket = getTestBucket();
-	state std::string prefix = "delete-recursive-" + deterministicRandom()->randomUniqueID().shortString() + "/";
-
-	TraceEvent("GCSDeleteRecursivelyTest_Start").detail("Bucket", bucket).detail("Prefix", prefix);
-
-	state std::vector<std::string> testObjects;
-	testObjects.push_back(prefix + "file1.txt");
-	testObjects.push_back(prefix + "file2.txt");
-	testObjects.push_back(prefix + "subdir/file3.txt");
-	testObjects.push_back(prefix + "subdir/file4.txt");
-
-	state int i;
-	for (i = 0; i < testObjects.size(); i++) {
-		std::string content = format("Content for %s", testObjects[i].c_str());
-		wait(gcs->writeEntireFile(bucket, testObjects[i], content));
-		TraceEvent("GCSDeleteRecursivelyTest_ObjectCreated").detail("Object", testObjects[i]);
-	}
-
-	state int numDeleted = 0;
-	state int64_t bytesDeleted = 0;
-
-	TraceEvent("GCSDeleteRecursivelyTest_Deleting").detail("Prefix", prefix);
-	wait(gcs->deleteRecursively(bucket, prefix, &numDeleted, &bytesDeleted));
-
-	TraceEvent("GCSDeleteRecursivelyTest_DeleteComplete")
-	    .detail("NumDeleted", numDeleted)
-	    .detail("BytesDeleted", bytesDeleted);
-
-	ASSERT(numDeleted == testObjects.size());
-	ASSERT(bytesDeleted > 0);
-
-	for (i = 0; i < testObjects.size(); i++) {
-		state bool exists = wait(gcs->objectExists(bucket, testObjects[i]));
-		TraceEvent("GCSDeleteRecursivelyTest_VerifyDeleted")
-		    .detail("Object", testObjects[i])
-		    .detail("Exists", exists);
-		ASSERT(!exists);
-	}
-
-	TraceEvent("GCSDeleteRecursivelyTest_Success");
-
-	return Void();
 }
