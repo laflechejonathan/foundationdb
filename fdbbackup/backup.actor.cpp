@@ -44,10 +44,10 @@
 #include "fdbclient/Status.h"
 #include "fdbclient/BackupContainer.h"
 #include "fdbclient/ClusterConnectionFile.h"
+#include "fdbclient/IBlobStoreEndpoint.h"
 #include "fdbclient/KeyBackedTypes.actor.h"
 #include "fdbclient/IKnobCollection.h"
 #include "fdbclient/RunRYWTransaction.actor.h"
-#include "fdbclient/S3BlobStore.h"
 #include "fdbclient/SystemData.h"
 #include "fdbclient/json_spirit/json_spirit_writer_template.h"
 
@@ -1553,12 +1553,12 @@ ACTOR Future<std::string> getLayerStatus(Reference<ReadYourWritesTransaction> tr
 	o.create("networkAddress") = localIP.toString();
 
 	if (exe == ProgramExe::AGENT) {
-		static S3BlobStoreEndpoint::Stats last_stats;
+		static IBlobStoreEndpoint::Stats last_stats;
 		static double last_ts = 0;
-		S3BlobStoreEndpoint::Stats current_stats = S3BlobStoreEndpoint::s_stats;
+		IBlobStoreEndpoint::Stats current_stats = IBlobStoreEndpoint::s_stats;
 		JSONDoc blobstats = o.create("blob_stats");
 		blobstats.create("total") = current_stats.getJSON();
-		S3BlobStoreEndpoint::Stats diff = current_stats - last_stats;
+		IBlobStoreEndpoint::Stats diff = current_stats - last_stats;
 		json_spirit::mObject diffObj = diff.getJSON();
 		if (last_ts > 0)
 			diffObj["bytes_per_second"] = double(current_stats.bytes_sent - last_stats.bytes_sent) / (now() - last_ts);

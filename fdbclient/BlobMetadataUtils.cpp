@@ -20,12 +20,13 @@
 
 #include "fdbclient/BlobMetadataUtils.h"
 
+#include "fdbclient/IBlobStoreEndpoint.h"
+#include "fdbclient/IKnobCollection.h"
 #include "fmt/format.h"
 #include "flow/IRandom.h"
 #include "flow/flow.h"
 #include "fdbclient/Knobs.h"
 #include "flow/IConnection.h"
-#include "fdbclient/S3BlobStore.h"
 
 std::string buildPartitionPath(const std::string& url, const std::string& partition) {
 	ASSERT(!partition.empty());
@@ -38,12 +39,11 @@ std::string buildPartitionPath(const std::string& url, const std::string& partit
 	} else if (u.startsWith("blobstore://"_sr)) {
 		std::string resource;
 		std::string lastOpenError;
-		S3BlobStoreEndpoint::ParametersT backupParams;
+		IBlobStoreEndpoint::ParametersT backupParams;
 
 		std::string urlCopy = url;
 
-		Reference<S3BlobStoreEndpoint> bstore =
-		    S3BlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
+		IBlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
 
 		ASSERT(!resource.empty());
 		ASSERT(resource.back() != '/');
