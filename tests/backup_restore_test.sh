@@ -2,25 +2,22 @@
 set -euo pipefail
 # Test backup and restore from s3 or GCS.
 #
-# Test backup and restore from s3.
-#
 # In the below we start a small FDB cluster, populate it with
-# some data and then start up a seaweedfs instance, use S3
-# if it is available, or use a GCS emulator. We then run a
+# some data and then start up a seaweedfs instance, or use S3,
+# or GCS, if they are configured. We then run a
 # backup to the blob store and then a restore. We verify the
 # restore is the same as the original.
 #
-# Debugging, run this script w/ the -x flag: e.g. bash -x s3_backup_test.sh...
+# Debugging, run this script w/ the -x flag: e.g. bash -x backup_restore_test.sh...
 # You can also disable the cleanup. This will leave processes up
 # so you can manually rerun commands or peruse logs and data
 # under SCRATCH_DIR.
 #
 # Usage:
-#   s3_backup_unified.sh <source_dir> <build_dir> [scratch_dir] [--encrypt] [--gcs]
+#   s3_backup_unified.sh <source_dir> <build_dir> [scratch_dir] [--encrypt]
 #
 # Options:
 #   --encrypt  Enable backup encryption with a test key
-#   --gcs      Use GCS emulator at localhost:9023 instead of S3/SeaweedFS
 #
 # See https://apple.github.io/foundationdb/backups.html
 
@@ -178,7 +175,7 @@ function test_s3_backup_and_restore {
       return 1
     fi
   fi
-  log "Run s3 backup"
+  log "Run blob storage backup"
   if ! backup "${local_build_dir}" "${local_scratch_dir}" "${local_url}" "${credentials}" "${local_encryption_key_file}"; then
     err "Failed backup"
     return 1
@@ -188,7 +185,7 @@ function test_s3_backup_and_restore {
     err "Failed clear data in fdb"
     return 1
   fi
-  log "Restore from s3"
+  log "Restore from blob storage"
   if ! restore "${local_build_dir}" "${local_scratch_dir}" "${local_url}" "${credentials}" "${local_encryption_key_file}"; then
     err "Failed restore"
     return 1
@@ -214,17 +211,12 @@ set -o noclobber
 
 # Parse command line arguments
 USE_ENCRYPTION=false
-USE_GCS=false
 PARAMS=()
 
 while (( "$#" )); do
   case "$1" in
     --encrypt)
       USE_ENCRYPTION=true
-      shift
-      ;;
-    --gcs)
-      USE_GCS=true
       shift
       ;;
     -*|--*=) # unsupported flags
@@ -251,15 +243,13 @@ readonly TAG="test_backup"
 # OKTETO_NAMESPACE is defined (It is defined on the okteto
 # internal apple dev environments where S3 is available).
 readonly USE_S3="${USE_S3:-$( if [[ -n "${OKTETO_NAMESPACE+x}" ]]; then echo "true" ; else echo "false"; fi )}"
+readonly USE_GCS="$( if [[ -n "${GCS_FDB_BUCKET}" && -n "${GCS_APPLICATION_TOKEN}" ]]; then echo "true"; else echo "false"; fi )"
 
 # Set KNOBS based on whether we're using real S3, GCS, GCS Emulator, or SeaweedFS
 # This will be finalized after we determine the storage backend
 if [[ "${USE_S3}" == "true" ]]; then
   # Use AWS KMS encryption for real S3
   KNOBS=("--knob_blobstore_encryption_type=aws:kms" "--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
-elif [[ "${USE_GCS}" == "true" ]]; then
-  # TLS settings for GCP will be added later
-  KNOBS=("--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
 else
   # No encryption for SeaweedFS
   KNOBS=("--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
@@ -350,32 +340,30 @@ blob_credentials_file=
 url_prefix="blobstore"
 
 if [[ "${USE_GCS}" == "true" ]]; then
-  log "Testing against real GCP"
-  # Use real GCP storage.googleapis.com
-
-  readonly host="@storage.googleapis.com"
-  readonly bucket="palantir-foundationdb-gcp-dev"
-  # Create test scratch directory
-  TEST_SCRATCH_DIR="${scratch_dir}/gcs_test_$$"
-  if ! mkdir -p "${TEST_SCRATCH_DIR}"; then
-    err "Failed create of the test dir: ${TEST_SCRATCH_DIR}" >&2
+  log "Testing against GCS"
+  # Now source in the aws fixture so we can use its methods in the below.
+  # shellcheck source=/dev/null
+  if ! source "${cwd}/../fdbclient/tests/gcp_fixture.sh"; then
+    err "Failed to source gcp_fixture.sh"
+    exit 1
+  fi
+  if ! TEST_SCRATCH_DIR=$( create_gcp_dir "${scratch_dir}" ); then
+    err "Failed creating local gcp_dir"
     exit 1
   fi
   readonly TEST_SCRATCH_DIR
-  # Use real GCP credentials
-  readonly blob_credentials_file="/Volumes/git/hacking/gcp/token.json"
-  if [[ ! -f "${blob_credentials_file}" ]]; then
-    err "GCP credentials file not found: ${blob_credentials_file}"
+  echo "scratch_dir: $TEST_SCRATCH_DIR"
+  if ! readarray -t configs < <(gcp_setup "${build_dir}" "${TEST_SCRATCH_DIR}"); then
+    err "Failed gcp_setup"
     exit 1
   fi
-  # Use secure TLS connection for real GCP with custom CA
-  query_str="secure_connection=1&bucket=$bucket&gcs=1"
-  url_prefix="blobstore"
-  # Set environment variable for GCS credentials
+  readonly host="${configs[0]}"
+  readonly bucket="${configs[1]}"
+  readonly blob_credentials_file="${configs[2]}"
+  query_str="bucket=${bucket}&gcs=1"
+  # Make these environment variables available for the fdb cluster and backup_agent
   export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
   export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
-#  # Add TLS knobs for GCP (must be done before KNOBS becomes readonly)
-#  KNOBS+=("--tls-verify-peers=Check.Valid=0")
   readonly KNOBS
 elif [[ "${USE_S3}" == "true" ]]; then
   log "Testing against s3"
@@ -399,7 +387,7 @@ elif [[ "${USE_S3}" == "true" ]]; then
   readonly blob_credentials_file="${configs[2]}"
   readonly region="${configs[3]}"
   query_str="bucket=${bucket}&region=${region}&secure_connection=1"
-  # Make these environment variables available for the fdb cluster and backup_agent when s3.
+  # Make these environment variables available for the fdb cluster and backup_agent
   export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
   export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
   readonly KNOBS
@@ -452,5 +440,6 @@ log "Backup_agent is up"
 # Run tests.
 test="test_s3_backup_and_restore"
 url="blobstore://${host}/${path_prefix}/${test}?${query_str}"
+echo "backup URL: $url "
 test_s3_backup_and_restore "${url}" "${TEST_SCRATCH_DIR}" "${blob_credentials_file}" "${build_dir}" "${ENCRYPTION_KEY_FILE}"
 log_test_result $? "test_s3_backup_and_restore"

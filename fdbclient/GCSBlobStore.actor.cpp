@@ -332,20 +332,13 @@ Future<bool> GCSBlobStoreEndpoint::bucketExists(std::string const& bucket) {
 }
 
 ACTOR Future<Void> createBucket_impl(Reference<GCSBlobStoreEndpoint> bstore, std::string bucket) {
-	// First check if bucket already exists
 	bool exists = wait(bstore->bucketExists(bucket));
 	if (exists) {
 		TraceEvent(SevInfo, "GCSBucketAlreadyExists").detail("Bucket", bucket);
 		return Void();
 	}
 
-	// For real GCP, we would need a project ID here, but bucket creation is typically
-	// done out-of-band. For now, just verify the bucket exists.
-	TraceEvent(SevWarn, "GCSBucketCreateSkipped")
-	    .detail("Bucket", bucket)
-	    .detail("Reason", "Bucket creation requires GCP project ID");
-
-	return Void();
+	throw not_implemented();
 }
 
 Future<Void> GCSBlobStoreEndpoint::createBucket(std::string const& bucket) {
