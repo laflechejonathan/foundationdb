@@ -38,7 +38,7 @@ struct BlobKnobs {
 	    concurrent_uploads, concurrent_lists, concurrent_reads_per_file, concurrent_writes_per_file, enable_read_cache,
 	    read_block_size, read_ahead_blocks, read_cache_blocks_per_file, max_send_bytes_per_second,
 	    max_recv_bytes_per_second, sdk_auth, global_connection_pool, max_delay_retryable_error,
-	    max_delay_connection_failed;
+	    max_delay_connection_failed, gcs_json_api;
 
 	bool set(StringRef name, int value);
 	std::string getURLParameters() const;
@@ -78,7 +78,8 @@ struct BlobKnobs {
 			"failure.",
 			"sdk_auth (or sa)                      Use AWS SDK to resolve credentials. Only valid if "
 			"BUILD_AWS_BACKUP is enabled.",
-			"global_connection_pool (or gcp)       Enable shared connection pool between all blobstore instances."
+			"global_connection_pool (or gcp)       Enable shared connection pool between all blobstore instances.",
+			"gcp_gcs_api (or gcs)					  Use Google Cloud Storage JSON APIs rather than S3's XML API."
 		};
 	}
 

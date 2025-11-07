@@ -2,6 +2,7 @@
 // Created by Jonathan Lafleche on 5/11/25.
 //
 #include "boost/algorithm/string/join.hpp"
+#include "fdbclient/GCSBlobStore.h"
 #include "fdbclient/IBlobStoreEndpoint.h"
 #include "fdbclient/IKnobCollection.h"
 #include "fdbclient/Knobs.h"
@@ -109,6 +110,7 @@ BlobKnobs::BlobKnobs() {
 	max_delay_connection_failed = CLIENT_KNOBS->BLOBSTORE_MAX_DELAY_CONNECTION_FAILED;
 	sdk_auth = false;
 	global_connection_pool = CLIENT_KNOBS->BLOBSTORE_GLOBAL_CONNECTION_POOL;
+	gcs_json_api = false;
 }
 
 bool BlobKnobs::set(StringRef name, int value) {
@@ -150,6 +152,7 @@ bool BlobKnobs::set(StringRef name, int value) {
 	TRY_PARAM(max_delay_connection_failed, dcf);
 	TRY_PARAM(sdk_auth, sa);
 	TRY_PARAM(global_connection_pool, gcp);
+	TRY_PARAM(gcs_json_api, gcs);
 #undef TRY_PARAM
 	return false;
 }
@@ -191,6 +194,7 @@ std::string BlobKnobs::getURLParameters() const {
 	_CHECK_PARAM(global_connection_pool, gcp);
 	_CHECK_PARAM(max_delay_retryable_error, dre);
 	_CHECK_PARAM(max_delay_connection_failed, dcf);
+	_CHECK_PARAM(gcs_json_api, gcs);
 #undef _CHECK_PARAM
 	return r;
 }
@@ -666,6 +670,11 @@ Reference<IBlobStoreEndpoint> IBlobStoreEndpoint::fromString(const std::string& 
 
 		if (resourceFromURL != nullptr)
 			*resourceFromURL = resource.toString();
+
+		if (knobs.gcs_json_api) {
+			return makeReference<GCSBlobStoreEndpoint>(
+			host.toString(), service.toString(), proxyHost, proxyPort, cred, knobs, extraHeaders);
+		}
 
 		return makeReference<S3BlobStoreEndpoint>(
 		    host.toString(), service.toString(), region, proxyHost, proxyPort, cred, knobs, extraHeaders);

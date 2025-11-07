@@ -1,19 +1,19 @@
 #!/bin/bash
-#
-# Test backup and restore from s3.
+# Test backup and restore from Blob Storage.
 #
 # In the below we start a small FDB cluster, populate it with
-# some data and then start up a seaweedfs instance or use S3
-# if it is available. We then run a backup to 'S3' and then
-# a restore. We verify the restore is the same as the original.
+# some data and then start up a seaweedfs instance, or use S3,
+# or GCS, if they are configured. We then run a
+# backup to the blob store and then a restore. We verify the
+# restore is the same as the original.
 #
-# Debugging, run this script w/ the -x flag: e.g. bash -x s3_backup_test.sh...
+# Debugging, run this script w/ the -x flag: e.g. bash -x backup_restore_test.sh...
 # You can also disable the cleanup. This will leave processes up
 # so you can manually rerun commands or peruse logs and data
 # under SCRATCH_DIR.
 #
 # Usage:
-#   s3_backup_unified.sh <source_dir> <build_dir> [scratch_dir] [--encrypt]
+#   backup_restore_test.sh <source_dir> <build_dir> [scratch_dir] [--encrypt]
 #
 # See https://apple.github.io/foundationdb/backups.html
 
@@ -157,7 +157,7 @@ function test_s3_backup_and_restore {
   local edited_url=$(echo "${local_url}" | sed -e "s/ctest/data\/ctest/" )
   readonly edited_url
   if [[ "${USE_S3}" == "true" ]]; then
-    # Run this rm only if s3. In seaweed, it would fail because
+    # Run this rm only if s3. In seaweed/GCS, it would fail because
     # bucket doesn't exist yet (they are lazily created).
     local preclear_cmd=("${local_build_dir}/bin/s3client")
     preclear_cmd+=("${KNOBS[@]}")
@@ -171,7 +171,7 @@ function test_s3_backup_and_restore {
       return 1
     fi
   fi
-  log "Run s3 backup"
+  log "Run blob storage backup"
   if ! backup "${local_build_dir}" "${local_scratch_dir}" "${local_url}" "${credentials}" "${local_encryption_key_file}"; then
     err "Failed backup"
     return 1
@@ -181,7 +181,7 @@ function test_s3_backup_and_restore {
     err "Failed clear data in fdb"
     return 1
   fi
-  log "Restore from s3"
+  log "Restore from blob storage"
   if ! restore "${local_build_dir}" "${local_scratch_dir}" "${local_url}" "${credentials}" "${local_encryption_key_file}"; then
     err "Failed restore"
     return 1
@@ -239,19 +239,20 @@ readonly TAG="test_backup"
 # OKTETO_NAMESPACE is defined (It is defined on the okteto
 # internal apple dev environments where S3 is available).
 readonly USE_S3="${USE_S3:-$( if [[ -n "${OKTETO_NAMESPACE+x}" ]]; then echo "true" ; else echo "false"; fi )}"
+readonly USE_GCS="$( if [[ -n "${GCS_FDB_BUCKET+x}" && -n "${GCS_APPLICATION_TOKEN+x}" ]]; then echo "true"; else echo "false"; fi )"
 
-# Set KNOBS based on whether we're using real S3 or SeaweedFS
+# Set KNOBS based on whether we're using real S3, GCS, or SeaweedFS
 if [[ "${USE_S3}" == "true" ]]; then
   # Use AWS KMS encryption for real S3
   KNOBS=("--knob_blobstore_encryption_type=aws:kms" "--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
 else
-  # No encryption for SeaweedFS
+  # No KMS encryption for SeaweedFS or GCS
   KNOBS=("--knob_http_verbose_level=${HTTP_VERBOSE_LEVEL}")
 fi
 readonly KNOBS
 
 # Set TLS_CA_FILE only when using real S3, not for SeaweedFS
-if [[ "${USE_S3}" == "true" ]]; then
+if [[ "${USE_S3}" == "true" || "${USE_GCS}" == "true" ]]; then
   # Try to find a valid TLS CA file if not explicitly set
   if [[ -z "${TLS_CA_FILE:-}" ]]; then
     # Common locations for TLS CA files on different systems
@@ -326,12 +327,38 @@ if [[ "${USE_ENCRYPTION}" == "true" ]]; then
 fi
 readonly ENCRYPTION_KEY_FILE
 
-# Set host, bucket, and blob_credentials_file whether seaweed or s3.
+# Set host, bucket, and blob_credentials_file whether seaweed, s3, or gcs.
 readonly path_prefix="ctests"
 host=
 query_str=
 blob_credentials_file=
-if [[ "${USE_S3}" == "true" ]]; then
+
+if [[ "${USE_GCS}" == "true" ]]; then
+  log "Testing against GCS"
+  # Now source in the aws fixture so we can use its methods in the below.
+  # shellcheck source=/dev/null
+  if ! source "${cwd}/../fdbclient/tests/gcp_fixture.sh"; then
+    err "Failed to source gcp_fixture.sh"
+    exit 1
+  fi
+  if ! TEST_SCRATCH_DIR=$( create_gcp_dir "${scratch_dir}" ); then
+    err "Failed creating local gcp_dir"
+    exit 1
+  fi
+  readonly TEST_SCRATCH_DIR
+  echo "scratch_dir: $TEST_SCRATCH_DIR"
+  if ! readarray -t configs < <(gcp_setup "${build_dir}" "${TEST_SCRATCH_DIR}"); then
+    err "Failed gcp_setup"
+    exit 1
+  fi
+  readonly host="${configs[0]}"
+  readonly bucket="${configs[1]}"
+  readonly blob_credentials_file="${configs[2]}"
+  query_str="bucket=${bucket}&gcs=1"
+  # Make these environment variables available for the fdb cluster and backup_agent
+  export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
+  export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
+elif [[ "${USE_S3}" == "true" ]]; then
   log "Testing against s3"
   # Now source in the aws fixture so we can use its methods in the below.
   # shellcheck source=/dev/null
@@ -353,7 +380,7 @@ if [[ "${USE_S3}" == "true" ]]; then
   readonly blob_credentials_file="${configs[2]}"
   readonly region="${configs[3]}"
   query_str="bucket=${bucket}&region=${region}&secure_connection=1"
-  # Make these environment variables available for the fdb cluster and backup_agent when s3.
+  # Make these environment variables available for the fdb cluster and backup_agent
   export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
   export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
 else
@@ -373,7 +400,7 @@ else
     err "Failed to run seaweed"
     return 1
   fi
-  readonly host
+  readonly host="@$host"
   readonly bucket="${SEAWEED_BUCKET}"
   readonly region="all_regions"
   # Reference a non-existent blob file (its ignored by seaweed)
