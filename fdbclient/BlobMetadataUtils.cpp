@@ -26,6 +26,7 @@
 #include "fdbclient/Knobs.h"
 #include "flow/IConnection.h"
 #include "fdbclient/S3BlobStore.h"
+#include "fdbclient/GCSBlobStore.h"
 
 std::string buildPartitionPath(const std::string& url, const std::string& partition) {
 	ASSERT(!partition.empty());
@@ -42,8 +43,11 @@ std::string buildPartitionPath(const std::string& url, const std::string& partit
 
 		std::string urlCopy = url;
 
-		Reference<S3BlobStoreEndpoint> bstore =
-		    S3BlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
+        if (GCSBlobStoreEndpoint::isGCSURL(url)) {
+            GCSBlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
+        } else {
+            S3BlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
+        }
 
 		ASSERT(!resource.empty());
 		ASSERT(resource.back() != '/');
