@@ -52,6 +52,26 @@ std::string awsV4URIEncode(const std::string& s, bool encodeSlash) {
 	return o;
 }
 
+static const std::unordered_set GCS_RESERVED_CHARS = {
+	'!', '#', '$', '&', '\'', '(', ')', '*', '+', ',', '/', ':', ';',
+	'=', '?', '@', '[', ']', ' '
+};
+
+std::string gcpPathParamUrlEncode(const std::string& s) {
+	std::string o;
+	o.reserve(s.size() * 3);
+	char buf[4];
+	for (auto c : s) {
+		if (GCS_RESERVED_CHARS.count(c)) {
+			sprintf(buf, "%%%.02X", c);
+			o.append(buf);
+		} else {
+			o.append(&c, 1);
+		}
+	}
+	return o;
+}
+
 std::string urlEncode(const std::string& s) {
 	std::string o;
 	o.reserve(s.size() * 3);
