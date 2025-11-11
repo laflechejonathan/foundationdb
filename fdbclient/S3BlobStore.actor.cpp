@@ -27,13 +27,9 @@
 #include <climits>
 #include <time.h>
 #include <iomanip>
-#include <sstream>
-#include <vector>
 #include <openssl/sha.h>
-#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
-#include <openssl/pem.h>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string.hpp>
@@ -1430,21 +1426,6 @@ std::string S3BlobStoreEndpoint::hmac_sha1(Credentials const& creds, std::string
 	return SHA1::from_string(kopad);
 }
 
-std::string to_hex(const unsigned char* data, size_t len) {
-    std::ostringstream oss;
-    for (size_t i = 0; i < len; ++i)
-        oss << std::hex << std::setw(2) << std::setfill('0') << (int)data[i];
-    return oss.str();
-}
-
-EVP_PKEY* load_private_key_from_string(const std::string& key_str) {
-    BIO* bio = BIO_new_mem_buf(key_str.data(), key_str.size());
-    if (!bio) return nullptr;
-    EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    return pkey;
-}
-
 std::string sha256_hex(std::string str) {
 	unsigned char hash[SHA256_DIGEST_LENGTH];
 	SHA256_CTX sha256;
@@ -1540,8 +1521,8 @@ void S3BlobStoreEndpoint::setV4AuthHeaders(std::string const& verb,
 	ASSERT(!headers["Host"].empty());
 	// Using unsigned payload here and adding content-md5 to the signed headers. It may be better to also include sha256
 	// sum for added security.
-	headers[headerPrefix + "content-sha256"] = "UNSIGNED-PAYLOAD";
-	headers[headerPrefix + "date"] = amzDate;
+	headers["x-amz-content-sha256"] = "UNSIGNED-PAYLOAD";
+	headers["x-amz-date"] = amzDate;
 	std::vector<std::pair<std::string, std::string>> headersList;
 	headersList.push_back({ "host", trim_copy(headers["Host"]) + "\n" });
 	if (headers.find("Content-Type") != headers.end())
@@ -1549,7 +1530,7 @@ void S3BlobStoreEndpoint::setV4AuthHeaders(std::string const& verb,
 	if (headers.find("Content-MD5") != headers.end())
 		headersList.push_back({ "content-md5", trim_copy(headers["Content-MD5"]) + "\n" });
 	for (auto h : headers) {
-		if (StringRef(h.first).startsWith(headerPrefix))
+		if (StringRef(h.first).startsWith("x-amz"_sr))
 			headersList.push_back({ to_lower_copy(h.first), trim_copy(h.second) + "\n" });
 	}
 	std::sort(headersList.begin(), headersList.end());
@@ -1561,68 +1542,20 @@ void S3BlobStoreEndpoint::setV4AuthHeaders(std::string const& verb,
 	}
 	signedHeaders.pop_back();
 	std::string canonicalRequest = verb + "\n" + canonicalURI + "\n" + canonicalQueryString + "\n" + canonicalHeaders +
-	                               "\n" + signedHeaders + "\n" + headers[headerPrefix + "content-sha256"];
+	                               "\n" + signedHeaders + "\n" + headers["x-amz-content-sha256"];
+
 	// ************* TASK 2: CREATE THE STRING TO SIGN*************
-	// Palantir note: This will not work with GCP HMAC keys which other people are currently using.
-	// We need to knob this when upstreaming.
-	std::string algorithm = isGcp ? "GOOG4-RSA-SHA256" : "AWS4-HMAC-SHA256";
-	std::string credentialScope = dateStamp + "/" + region + (isGcp ? "/storage/goog4_request" : "/s3/aws4_request");
+	std::string algorithm = "AWS4-HMAC-SHA256";
+	std::string credentialScope = dateStamp + "/" + region + "/s3/" + "aws4_request";
 	std::string stringToSign =
 	    algorithm + "\n" + amzDate + "\n" + credentialScope + "\n" + sha256_hex(canonicalRequest);
 
 	// ************* TASK 3: CALCULATE THE SIGNATURE *************
 	// Create the signing key using the function defined above.
-	std::string signature;
-
-	if (isGcp) {
-		EVP_PKEY* pkey = load_private_key_from_string(secretKey);
-		if (!pkey) {
-			TraceEvent(SevWarn, "S3BlobStoreFailedToLoadPrivKey");
-			throw backup_auth_unreadable();
-		}
-
-		EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-		if (!ctx) {
-			TraceEvent(SevWarn, "S3BlobStoreFailedToCreateContext");
-			EVP_PKEY_free(pkey);
-			throw backup_auth_unreadable();
-		}
-
-		if (EVP_DigestSignInit(ctx, nullptr, EVP_sha256(), nullptr, pkey) != 1 ||
-			EVP_DigestSignUpdate(ctx, stringToSign.c_str(), stringToSign.size()) != 1) {
-			TraceEvent(SevWarn, "S3BlobStoreFailedToSign");
-			EVP_MD_CTX_free(ctx);
-			EVP_PKEY_free(pkey);
-			throw backup_auth_unreadable();
-		}
-
-		size_t siglen = 0;
-		if (EVP_DigestSignFinal(ctx, nullptr, &siglen) != 1) {
-			TraceEvent(SevWarn, "S3BlobStoreFailedToGetSignatureLength");
-			EVP_MD_CTX_free(ctx);
-			EVP_PKEY_free(pkey);
-			throw backup_auth_unreadable();
-		}
-
-		std::vector<unsigned char> signatureVec(siglen);
-		if (EVP_DigestSignFinal(ctx, signatureVec.data(), &siglen) != 1) {
-			TraceEvent(SevWarn, "S3BlobStoreFailedToCreateSignature");
-			EVP_MD_CTX_free(ctx);
-			EVP_PKEY_free(pkey);
-			throw backup_auth_unreadable();
-		}
-
-		// Convert signature to hex string
-		signature = to_hex(signatureVec.data(), siglen);
-
-		EVP_MD_CTX_free(ctx);
-		EVP_PKEY_free(pkey);
-	} else {
-	    std::string signingKey =
-			hmac_sha256(hmac_sha256(hmac_sha256(hmac_sha256("AWS4" + secretKey, dateStamp), region), "s3"), "aws4_request");
-		// Sign the string_to_sign using the signing_key
-		signature = hmac_sha256_hex(signingKey, stringToSign);
-	}
+	std::string signingKey =
+	    hmac_sha256(hmac_sha256(hmac_sha256(hmac_sha256("AWS4" + secretKey, dateStamp), region), "s3"), "aws4_request");
+	// Sign the string_to_sign using the signing_key
+	std::string signature = hmac_sha256_hex(signingKey, stringToSign);
 	// ************* TASK 4: ADD SIGNING INFORMATION TO THE Header *************
 	std::string authorizationHeader = algorithm + " " + "Credential=" + accessKey + "/" + credentialScope + ", " +
 	                                  "SignedHeaders=" + signedHeaders + ", " + "Signature=" + signature;
@@ -1717,7 +1650,7 @@ ACTOR Future<Void> writeEntireFileFromBuffer_impl(Reference<S3BlobStoreEndpoint>
 	HTTP::Headers headers;
 	// Send MD5 sum for content so blobstore can verify it
 	headers["Content-MD5"] = contentMD5;
-	if (!bstore->isGcp && !CLIENT_KNOBS->BLOBSTORE_ENCRYPTION_TYPE.empty())
+	if (!CLIENT_KNOBS->BLOBSTORE_ENCRYPTION_TYPE.empty())
 		headers["x-amz-server-side-encryption"] = CLIENT_KNOBS->BLOBSTORE_ENCRYPTION_TYPE;
 	state Reference<HTTP::IncomingResponse> r =
 	    wait(bstore->doRequest("PUT", resource, headers, pContent, contentLen, { 200 }));
@@ -1815,7 +1748,7 @@ ACTOR static Future<std::string> beginMultiPartUpload_impl(Reference<S3BlobStore
 	std::string resource = constructResourcePath(bstore, bucket, object);
 	resource += "?uploads";
 	HTTP::Headers headers;
-	if (!bstore->isGcp && !CLIENT_KNOBS->BLOBSTORE_ENCRYPTION_TYPE.empty())
+	if (!CLIENT_KNOBS->BLOBSTORE_ENCRYPTION_TYPE.empty())
 		headers["x-amz-server-side-encryption"] = CLIENT_KNOBS->BLOBSTORE_ENCRYPTION_TYPE;
 	Reference<HTTP::IncomingResponse> r = wait(bstore->doRequest("POST", resource, headers, nullptr, 0, { 200 }));
 
@@ -1976,81 +1909,6 @@ TEST_CASE("/backup/s3/v4headers") {
 		       "Signature=cf095e36bed9cd3139c2e8b3e20c296a79d8540987711bf3a0d816b19ae00314");
 		ASSERT(headers["x-amz-date"] == "20130524T000000Z");
 		ASSERT(headers["Host"] == "s3.us-west-2.amazonaws.com");
-		ASSERT(headers["Content-Type"] == "Application/x-amz-json-1.0");
-	}
-
-	return Void();
-}
-
-TEST_CASE("/backup/s3/gcs/v4headers") {
-	std::string pkey = "-----BEGIN PRIVATE KEY-----\n"
-		"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDOqPWJpx1jt2oj\n"
-		"PXbjzYUptBc/9PNFe7THd/83WwK27EQ/Nlg4HbWIayOGW5the5FJ3QalpGmAHoh9\n"
-		"DsxLoRJQluJnaq9shCM4XrzglbEQ5qMQhZboBXVwOySeU1C2M5xG+aqQRISWx6SB\n"
-		"6a1NJn7Sz4WQLhBpOwK3aXtR7lboNmSyRlw/xW7eKhCrqFvRS3At8AokRpxDlR6Y\n"
-		"rdhEuCcqMOiZkwK1dOB87BJaBFDITYwjaOoONsGAc9r7FZIhrLDetOFFLRFdMyM8\n"
-		"WyUzvv3jlCA/7B+ELxEf8BcCP2Yt5FD/JmfIz61H04v+2rnikvtl3KE2XvluncHb\n"
-		"MbSjs1LrAgMBAAECggEAWTpxXaBWm63fOVz5/szHgKSd30L7YJZTjUZd3wBAMUvd\n"
-		"AbAMshn9veuIeKQH+DSanBo/GvjchnFofBqOEd93YW1sTrutB30cGeQpyAxJ2eLD\n"
-		"KEiNyhtFRBJ9MpEFic3J3YlB4C19U/7aJC+JYITNAGeSoxiIhG7yss9r7Ams43CF\n"
-		"Smx72OahETzVPt4vLupiFurDtREC+Zca5Dv25HAa3gaWtxYtM45XMcQJWEQBXoST\n"
-		"oZbnc5uGV4VAINuPXd/UidU0DZWyDUJrKn78Z2kI5Ij9QiwEEBUq4oNjV03SXUhU\n"
-		"vTaRlcaVH+wvSj8+IdB7ClkTMDOIseTAVU428cuWhQKBgQD9MnnKZWPbCDRNJhUW\n"
-		"7XIWYvGwUDUTuz9y/+TsL6gIJD556jW38xucjF9tx6K6KCm1IQl8B2smE0C4Qw6Q\n"
-		"2E4hsW668Il8ok0oASF9UpbmKEIcJec4KlGeIHqrVMdg6/bY21l3ReP/Cl9zeWXQ\n"
-		"jhBzTRk1l0eRIPXKRR5k9GBrTQKBgQDQ8pqPR7uuki9VuGpz7eZS/cohUm+PGrTL\n"
-		"tM4M/L/A4N44FHYzU0AfEUHF4DSQgnBiuwE3yOnn+3o4tO1Sq4O62sRoLVBPhmhZ\n"
-		"oQxnP5AtJBTyHDAej071WKIOOpVU22sOSMza+e7hMWnhNndvyXSkJOdJgKQ9RrVe\n"
-		"SIqvVbLrFwKBgGZ2O7T9DMjBbDDgPV6W3jlS9w1rl98RQl7uURyHOI9641GAxxZW\n"
-		"qhDS+Xc6d46v3Bjxcp4ffmvdFK68bDOPZSbbX70ExA6Mu3553qyRdIFVP1OWvxgK\n"
-		"gBbme93DpB+DvdQKCA1tWhOGhhP7x4j7RIr0Y0Q9oPeJCA4/pEokXrRtAoGBAJeJ\n"
-		"e0KyuZEQADhg+QN+4+4IlZG5IaNdsQWT6WRN4hvWehOd82Oh2v0tHNCPnE+56hwQ\n"
-		"l/+HPOy725ZI0V2FepIHmy4avwYN6pwmSsKOvNegNXiprNRdBty1HULIhgj24RuI\n"
-		"/NlLLk4v8iQdxl1Sc7+f7AXIwFSYdW0dm0cyFgKdAoGATrbtFDCPPB8gXRlYBq+j\n"
-		"bfzBVWqL6nNJgHlDN3biZvPUmndeJ5qgPvWPsJc7yAvt/XptcgABHFgLVApfbpB2\n"
-		"d9ReLwr3gLIrfBBLBiIpbAKfusVU209d86LjJmRkTqPeQxTn62ZkP3ja69bBZkcl\n"
-		"uiVWNOXuvc2BUzX5kaBsCF4=\n"
-		"-----END PRIVATE KEY-----\n";
-    S3BlobStoreEndpoint::Credentials creds{ "user@account.com", pkey, "" };
-	// GET without query parameters
-	{
-		S3BlobStoreEndpoint s3("s3.googleapis.com", "443", "amazonaws", "proxy", "port", creds);
-		std::string verb("GET");
-		std::string resource("/test.txt");
-		HTTP::Headers headers;
-		headers["Host"] = "s3.googleapis.com";
-		s3.setV4AuthHeaders(verb, resource, headers, "20130524T000000Z", "20130524");
-		ASSERT(headers["Authorization"] ==
-		       "GOOG4-RSA-SHA256 Credential=user@account.com/20130524/auto/storage/goog4_request, SignedHeaders=host;x-goog-content-sha256;x-goog-date, Signature=0fb69ef0480db1be4043a17d40dd258afb48e5f2a8adcffa22af84aac0859b2c4b17f16796ef8503cd437e20a77ced4ac52f4dbca2348b7793d148075b21199708b6f5b3cd9a502548049e33af5b88b23c50b80dc21c4c0a9985971bf7a2a4f568b03df80740e5af7802f5a46f9efafaddd9cdd3709bcbf2c421649b6ddc5bf344f1f065efa45676282b2a1fff7b8f4e7a9cc827f1cfc12f15fc1e510687ce50fcb96b13d0a13d02f94d66c017b50d5f0a73c36da7e3e337821c856370288089ad6e302e28c8b05a60bdb3204b36b58d8991e07c01a1deed602339d627e9314a264a9c9adcaeeaebee02091eb992ab8dee804ac642990d0da6b8255ca657d7e8");
-		ASSERT(headers["x-goog-date"] == "20130524T000000Z");
-	}
-
-	// GET with query parameters
-	{
-		S3BlobStoreEndpoint s3("s3.googleapis.com", "443", "amazonaws", "proxy", "port", creds);
-		std::string verb("GET");
-		std::string resource("/test/examplebucket?Action=DescribeRegions&Version=2013-10-15");
-		HTTP::Headers headers;
-		headers["Host"] = "s3.googleapis.com";
-		s3.setV4AuthHeaders(verb, resource, headers, "20130524T000000Z", "20130524");
-		ASSERT(headers["Authorization"] ==
-		       "GOOG4-RSA-SHA256 Credential=user@account.com/20130524/auto/storage/goog4_request, SignedHeaders=host;x-goog-content-sha256;x-goog-date, Signature=953afc0c856da60c3dfbd84a37cb97e5593f257b3e52cde69f49b99d296c9c47400152291cebcb0a03a31524ebe042ff2e83326006eac5ee89dd02fc3c9f60fbca8b54f60748d09fc71fe45d7737e7905add94f75979f7eefd5a9c6cf6b9362e26895d0c0795658efd94dbfed09d3887c4d110d7fa7f183aa5d57eef453fd1a00fffc9dd8c304b2f32425c4effa64bbf8b0499d1798596569d6bad12d3be7864edda18332a8df3819d9c39ba314d82f83ee83e24ab10508fb24c2fcbfc33e0951f05fe3dfd77dc46ea7caa64c816a7a467d1f95bc772bda8873536de511590ff2819784c07ae80f0070e3ef511eb1f3190af6b841311f41ecc8f8fcd33f58231");
-		ASSERT(headers["x-goog-date"] == "20130524T000000Z");
-	}
-
-	// POST
-	{
-		S3BlobStoreEndpoint s3("s3.googleapis.com", "443", "us-west-2", "proxy", "port", creds);
-		std::string verb("POST");
-		std::string resource("/simple.json");
-		HTTP::Headers headers;
-		headers["Host"] = "s3.googleapis.com";
-		headers["Content-Type"] = "Application/x-amz-json-1.0";
-		s3.setV4AuthHeaders(verb, resource, headers, "20130524T000000Z", "20130524");
-		ASSERT(headers["Authorization"] ==
-		       "GOOG4-RSA-SHA256 Credential=user@account.com/20130524/auto/storage/goog4_request, SignedHeaders=content-type;host;x-goog-content-sha256;x-goog-date, Signature=8cf61d9e46ab01f2e4aac700884123686a000b4bf52316364cdc38e66880051f4cecd2f1e8ec6d4a5480f475a7f397d65142de9163a96bc04e74e213a82f7b9daf4f44f5764bae2fb1f495cb32ef15ee63749349cfb8b5cf010113d146b2f178ddc3866ff34b4f285d4bbf93734754b33933f6e36d08f3355241f2aa0ff15134970d72535c26d5f165f54a89aca66b620294edd7a5c17a28dce8097aa612bbad1f68013878f4d7e2ba530f592fdfd210131cf1b6268d7b51d49c6932c99042d6d8c141d4ca190edaa1c3e4fb7ca9f7fd7965309d5b8d772fdb6a669e967ab2b8640f6c8924239d9a3cf6135a651cf22b50f20b98b4df75498cce7bad31590265");
-		ASSERT(headers["x-goog-date"] == "20130524T000000Z");
-		ASSERT(headers["Host"] == "s3.googleapis.com");
 		ASSERT(headers["Content-Type"] == "Application/x-amz-json-1.0");
 	}
 
