@@ -287,7 +287,7 @@ Reference<IBackupContainer> IBackupContainer::openContainer(const std::string& u
 			IBlobStoreEndpoint::ParametersT backupParams;
 			Reference<IBlobStoreEndpoint> bstore;
 
-			bstore = S3BlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
+			bstore = IBlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 			BackupContainerBlobStore::validateBackupUrl(resource);
 			r = makeReference<BackupContainerBlobStore>(bstore, resource, backupParams, encryptionKeyFileName, true);
 		}
@@ -371,7 +371,7 @@ ACTOR Future<std::vector<std::string>> listContainers_impl(std::string baseURL, 
 			std::string resource;
 
 			IBlobStoreEndpoint::ParametersT backupParams;
-			Reference<IBlobStoreEndpoint> bstore = S3BlobStoreEndpoint::fromString(
+			Reference<IBlobStoreEndpoint> bstore = IBlobStoreEndpoint::fromString(
 			    baseURL, proxy, &resource, &IBackupContainer::lastOpenError, &backupParams);
 
 			if (!resource.empty()) {

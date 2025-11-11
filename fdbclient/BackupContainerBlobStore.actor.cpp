@@ -173,10 +173,10 @@ BackupContainerBlobStore::BackupContainerBlobStore(Reference<IBlobStoreEndpoint>
 }
 
 void BackupContainerBlobStore::addref() {
-	this->ReferenceCounted<IBlobStoreEndpoint>::addref();
+	return ReferenceCounted<BackupContainerBlobStore>::addref();
 }
 void BackupContainerBlobStore::delref() {
-	this->ReferenceCounted<IBlobStoreEndpoint>::delref();
+	return ReferenceCounted<BackupContainerBlobStore>::delref();
 }
 
 Future<Reference<IAsyncFile>> BackupContainerBlobStore::readFile(const std::string& path) {

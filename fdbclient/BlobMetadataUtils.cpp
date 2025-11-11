@@ -42,7 +42,7 @@ std::string buildPartitionPath(const std::string& url, const std::string& partit
 
 		std::string urlCopy = url;
 
-		S3BlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
+		IBlobStoreEndpoint::fromString(url, {}, &resource, &lastOpenError, &backupParams);
 
 		ASSERT(!resource.empty());
 		ASSERT(resource.back() != '/');

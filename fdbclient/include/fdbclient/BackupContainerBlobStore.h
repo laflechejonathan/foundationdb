@@ -27,7 +27,7 @@
 #include "fdbclient/IBlobStoreEndpoint.h"
 
 class BackupContainerBlobStore final : public BackupContainerFileSystem,
-                                         ReferenceCounted<IBlobStoreEndpoint> {
+                                         ReferenceCounted<BackupContainerBlobStore> {
 	Reference<IBlobStoreEndpoint> m_bstore;
 	std::string m_name;
 
