@@ -33,12 +33,12 @@ class UnsentPacketQueue;
 struct BlobKnobs {
 	BlobKnobs();
 	int secure_connection, connect_tries, connect_timeout, max_connection_life, request_tries, request_timeout_min,
-		requests_per_second, list_requests_per_second, write_requests_per_second, read_requests_per_second,
-		delete_requests_per_second, multipart_max_part_size, multipart_min_part_size, concurrent_requests,
-		concurrent_uploads, concurrent_lists, concurrent_reads_per_file, concurrent_writes_per_file,
-		enable_read_cache, read_block_size, read_ahead_blocks, read_cache_blocks_per_file,
-		max_send_bytes_per_second, max_recv_bytes_per_second, sdk_auth, global_connection_pool,
-		max_delay_retryable_error, max_delay_connection_failed;
+	    requests_per_second, list_requests_per_second, write_requests_per_second, read_requests_per_second,
+	    delete_requests_per_second, multipart_max_part_size, multipart_min_part_size, concurrent_requests,
+	    concurrent_uploads, concurrent_lists, concurrent_reads_per_file, concurrent_writes_per_file, enable_read_cache,
+	    read_block_size, read_ahead_blocks, read_cache_blocks_per_file, max_send_bytes_per_second,
+	    max_recv_bytes_per_second, sdk_auth, global_connection_pool, max_delay_retryable_error,
+	    max_delay_connection_failed;
 
 	bool set(StringRef name, int value);
 	std::string getURLParameters() const;
@@ -94,9 +94,9 @@ struct BlobStoreConnectionPoolKey {
 	bool isTLS;
 
 	BlobStoreConnectionPoolKey(const std::string& host,
-							   const std::string& service,
-							   const std::string& region,
-							   bool isTLS)
+	                           const std::string& service,
+	                           const std::string& region,
+	                           bool isTLS)
 	  : host(host), service(service), region(region), isTLS(isTLS) {}
 
 	bool operator==(const BlobStoreConnectionPoolKey& other) const {
@@ -118,10 +118,8 @@ struct hash<BlobStoreConnectionPoolKey> {
 };
 } // namespace std
 
-
 class IBlobStoreEndpoint {
 public:
-
 	struct Stats {
 		Stats() : requests_successful(0), requests_failed(0), bytes_sent(0) {}
 		Stats operator-(const Stats& rhs);
@@ -149,13 +147,13 @@ public:
 		// unecessary blob stats traces
 		BlobStats()
 		  : id(deterministicRandom()->randomUniqueID()), cc("BlobStoreStats", id.toString()),
-			requestsSuccessful("RequestsSuccessful", cc), requestsFailed("RequestsFailed", cc),
-			newConnections("NewConnections", cc), expiredConnections("ExpiredConnections", cc),
-			reusedConnections("ReusedConnections", cc), fastRetries("FastRetries", cc),
-			requestLatency("BlobStoreRequestLatency",
-						   id,
-						   CLIENT_KNOBS->BLOBSTORE_LATENCY_LOGGING_INTERVAL,
-						   CLIENT_KNOBS->BLOBSTORE_LATENCY_LOGGING_ACCURACY) {}
+		    requestsSuccessful("RequestsSuccessful", cc), requestsFailed("RequestsFailed", cc),
+		    newConnections("NewConnections", cc), expiredConnections("ExpiredConnections", cc),
+		    reusedConnections("ReusedConnections", cc), fastRetries("FastRetries", cc),
+		    requestLatency("BlobStoreRequestLatency",
+		                   id,
+		                   CLIENT_KNOBS->BLOBSTORE_LATENCY_LOGGING_INTERVAL,
+		                   CLIENT_KNOBS->BLOBSTORE_LATENCY_LOGGING_ACCURACY) {}
 	};
 
 	static Stats s_stats;
@@ -176,15 +174,14 @@ public:
 	static std::unordered_map<BlobStoreConnectionPoolKey, Reference<ConnectionPoolData>> globalConnectionPool;
 
 	IBlobStoreEndpoint(std::string const& host,
-						std::string const& service,
-						std::string const& region,
-						Optional<std::string> const& proxyHost,
-						Optional<std::string> const& proxyPort,
-						BlobKnobs const& knobs = BlobKnobs(),
-						HTTP::Headers extraHeaders = HTTP::Headers())
+	                   std::string const& service,
+	                   std::string const& region,
+	                   Optional<std::string> const& proxyHost,
+	                   Optional<std::string> const& proxyPort,
+	                   BlobKnobs const& knobs = BlobKnobs(),
+	                   HTTP::Headers extraHeaders = HTTP::Headers())
 	  : host(host), service(service), region(region), proxyHost(proxyHost), proxyPort(proxyPort),
-	    useProxy(proxyHost.present() && proxyPort.present()),
-		extraHeaders(extraHeaders), knobs(knobs),
+	    useProxy(proxyHost.present() && proxyPort.present()), extraHeaders(extraHeaders), knobs(knobs),
 	    requestRate(new SpeedLimit(knobs.requests_per_second, 1)),
 	    requestRateList(new SpeedLimit(knobs.list_requests_per_second, 1)),
 	    requestRateWrite(new SpeedLimit(knobs.write_requests_per_second, 1)),
@@ -239,67 +236,67 @@ public:
 		if (withResource)
 			resource = "<name>";
 		return format("blobstore://<api_key>:<secret>:<security_token>@<host>[:<port>]/"
-					  "%s[?<param>=<value>[&<param>=<value>]...]",
-					  resource);
+		              "%s[?<param>=<value>[&<param>=<value>]...]",
+		              resource);
 	}
 
 	// Parse url and return a IBlobStoreEndpoint
 	// If the url has parameters that IBlobStoreEndpoint can't consume then an error will be thrown unless
 	// ignored_parameters is given in which case the unconsumed parameters will be added to it.
 	static Reference<IBlobStoreEndpoint> fromString(const std::string& url,
-											const Optional<std::string>& proxy,
-											std::string* resourceFromURL,
-											std::string* error,
-											ParametersT* ignoredParameters);
+	                                                const Optional<std::string>& proxy,
+	                                                std::string* resourceFromURL,
+	                                                std::string* error,
+	                                                ParametersT* ignoredParameters);
 
 	virtual Future<bool> bucketExists(std::string const& bucket) = 0;
 	virtual Future<bool> objectExists(std::string const& bucket, std::string const& object) = 0;
 	virtual Future<int64_t> objectSize(std::string const& bucket, std::string const& object) = 0;
 	virtual Future<int> readObject(std::string const& bucket,
-	                                std::string const& object,
-	                                void* data,
-	                                int length,
-	                                int64_t offset) = 0;
+	                               std::string const& object,
+	                               void* data,
+	                               int length,
+	                               int64_t offset) = 0;
 	virtual Future<Void> deleteObject(std::string const& bucket, std::string const& object) = 0;
 	virtual Future<Void> deleteRecursively(std::string const& bucket,
-	                                        std::string prefix = "",
-	                                        int* pNumDeleted = nullptr,
-	                                        int64_t* pBytesDeleted = nullptr) = 0;
+	                                       std::string prefix = "",
+	                                       int* pNumDeleted = nullptr,
+	                                       int64_t* pBytesDeleted = nullptr) = 0;
 	virtual Future<std::string> readEntireFile(std::string const& bucket, std::string const& object) = 0;
 	virtual Future<Void> writeEntireFile(std::string const& bucket,
-	                                      std::string const& object,
-	                                      std::string const& content) = 0;
+	                                     std::string const& object,
+	                                     std::string const& content) = 0;
 	virtual Future<Void> writeEntireFileFromBuffer(std::string const& bucket,
-	                                                std::string const& object,
-	                                                UnsentPacketQueue* pContent,
-	                                                int contentLen,
-	                                                std::string const& contentMD5) = 0;
+	                                               std::string const& object,
+	                                               UnsentPacketQueue* pContent,
+	                                               int contentLen,
+	                                               std::string const& contentMD5) = 0;
 
 	virtual Future<std::string> beginMultiPartUpload(std::string const& bucket, std::string const& object) = 0;
 	virtual Future<std::string> uploadPart(std::string const& bucket,
-	                                        std::string const& object,
-	                                        std::string const& uploadID,
-	                                        unsigned int partNumber,
-	                                        UnsentPacketQueue* pContent,
-	                                        int contentLen,
-	                                        std::string const& contentMD5) = 0;
+	                                       std::string const& object,
+	                                       std::string const& uploadID,
+	                                       unsigned int partNumber,
+	                                       UnsentPacketQueue* pContent,
+	                                       int contentLen,
+	                                       std::string const& contentMD5) = 0;
 	virtual Future<Void> finishMultiPartUpload(std::string const& bucket,
-	                                            std::string const& object,
-	                                            std::string const& uploadID,
-	                                            MultiPartSetT const& parts) = 0;
+	                                           std::string const& object,
+	                                           std::string const& uploadID,
+	                                           MultiPartSetT const& parts) = 0;
 
 	virtual Future<Void> listObjectsStream(std::string const& bucket,
-	                                        PromiseStream<ListResult> results,
-	                                        Optional<std::string> prefix = {},
-	                                        Optional<char> delimiter = {},
-	                                        int maxDepth = 0,
-	                                        std::function<bool(std::string const&)> recurseFilter = nullptr) = 0;
+	                                       PromiseStream<ListResult> results,
+	                                       Optional<std::string> prefix = {},
+	                                       Optional<char> delimiter = {},
+	                                       int maxDepth = 0,
+	                                       std::function<bool(std::string const&)> recurseFilter = nullptr) = 0;
 
 	virtual Future<ListResult> listObjects(std::string const& bucket,
-	                                        Optional<std::string> prefix = {},
-	                                        Optional<char> delimiter = {},
-	                                        int maxDepth = 0,
-	                                        std::function<bool(std::string const&)> recurseFilter = nullptr) = 0;
+	                                       Optional<std::string> prefix = {},
+	                                       Optional<char> delimiter = {},
+	                                       int maxDepth = 0,
+	                                       std::function<bool(std::string const&)> recurseFilter = nullptr) = 0;
 
 	virtual Future<std::vector<std::string>> listBuckets() = 0;
 	virtual Future<Void> createBucket(std::string const& bucket) = 0;
@@ -308,13 +305,14 @@ public:
 	// parameters in addition to the passed params string
 	virtual std::string getResourceURL(std::string resource, std::string params) const = 0;
 	virtual Future<Void> updateSecret() = 0;
-	virtual void setAllAuthHeaders(const std::string& verb,
-						  const std::string& resource,
-						  HTTP::Headers& headers,
-						  std::string date = "",
-						  std::string datestamp = "") = 0;
+	virtual bool lookupSecretOnEachRequest() = 0;
+	virtual void setAllRequestHeaders(const std::string& verb,
+	                                  const std::string& resource,
+	                                  HTTP::Headers& headers,
+	                                  std::string date = "",
+	                                  std::string datestamp = "") = 0;
 
-	virtual std::string canonicalizeURI(const std::string& resource, std::vector<std::string>& queryParameters) = 0;
+	virtual std::string normalizeURIForRemoteRequest(const std::string& resource) = 0;
 
 	BlobKnobs knobs;
 	HTTP::Headers extraHeaders;
@@ -326,12 +324,11 @@ public:
 	// Do an HTTP request to the Blob Store, read the response.  Handles authentication.
 	// Every blob store interaction should ultimately go through this function
 	Future<Reference<HTTP::IncomingResponse>> doRequest(std::string const& verb,
-														std::string const& resource,
-														const HTTP::Headers& headers,
-														UnsentPacketQueue* pContent,
-														int contentLen,
-														std::set<unsigned int> successCodes);
-
+	                                                    std::string const& resource,
+	                                                    const HTTP::Headers& headers,
+	                                                    UnsentPacketQueue* pContent,
+	                                                    int contentLen,
+	                                                    std::set<unsigned int> successCodes);
 
 	// FIXME: add periodic connection reaper to pool
 	// local connection pool for this blobstore
@@ -362,7 +359,7 @@ public:
 		if (!blobStats && CLIENT_KNOBS->BLOBSTORE_ENABLE_LOGGING) {
 			blobStats = std::make_unique<BlobStats>();
 			specialCounter(
-				blobStats->cc, "GlobalConnectionPoolCount", [this]() { return this->globalConnectionPool.size(); });
+			    blobStats->cc, "GlobalConnectionPoolCount", [this]() { return this->globalConnectionPool.size(); });
 			specialCounter(blobStats->cc, "GlobalConnectionPoolSize", [this]() {
 				// FIXME: could track this explicitly via an int variable with extra logic, but this should be small and
 				// infrequent
@@ -374,11 +371,9 @@ public:
 			});
 
 			statsLogger = blobStats->cc.traceCounters(
-				"BlobStoreMetrics", blobStats->id, CLIENT_KNOBS->BLOBSTORE_STATS_LOGGING_INTERVAL, "BlobStoreMetrics");
+			    "BlobStoreMetrics", blobStats->id, CLIENT_KNOBS->BLOBSTORE_STATS_LOGGING_INTERVAL, "BlobStoreMetrics");
 		}
 	}
-
 };
 
 Future<Optional<json_spirit::mObject>> tryReadJSONFile(std::string path);
-

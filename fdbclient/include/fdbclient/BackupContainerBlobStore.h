@@ -26,8 +26,7 @@
 #include "fdbclient/BackupContainerFileSystem.h"
 #include "fdbclient/IBlobStoreEndpoint.h"
 
-class BackupContainerBlobStore final : public BackupContainerFileSystem,
-                                         ReferenceCounted<BackupContainerBlobStore> {
+class BackupContainerBlobStore final : public BackupContainerFileSystem, ReferenceCounted<BackupContainerBlobStore> {
 	Reference<IBlobStoreEndpoint> m_bstore;
 	std::string m_name;
 
@@ -46,10 +45,10 @@ class BackupContainerBlobStore final : public BackupContainerFileSystem,
 
 public:
 	BackupContainerBlobStore(Reference<IBlobStoreEndpoint> bstore,
-	                           const std::string& name,
-	                           const IBlobStoreEndpoint::ParametersT& params,
-	                           const Optional<std::string>& encryptionKeyFileName,
-	                           bool isBackup);
+	                         const std::string& name,
+	                         const IBlobStoreEndpoint::ParametersT& params,
+	                         const Optional<std::string>& encryptionKeyFileName,
+	                         bool isBackup);
 
 	void addref() override;
 	void delref() override;
@@ -78,8 +77,6 @@ public:
 	Future<Void> deleteContainer(int* pNumDeleted) final;
 
 	std::string getBucket() const;
-
-
 };
 
 #endif

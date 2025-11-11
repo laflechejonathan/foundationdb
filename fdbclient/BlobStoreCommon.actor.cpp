@@ -250,7 +250,9 @@ ACTOR Future<IBlobStoreEndpoint::ReusableConnection> connect_impl(Reference<IBlo
 	    .detail("ExpiresIn", b->knobs.max_connection_life)
 	    .detail("Proxy", b->proxyHost.orDefault(""));
 
-	wait(b->updateSecret());
+	if (b->lookupSecretOnEachRequest()) {
+		wait(b->updateSecret());
+	}
 
 	return IBlobStoreEndpoint::ReusableConnection({ conn, now() + b->knobs.max_connection_life });
 }
@@ -277,7 +279,6 @@ ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<IBlobSt
 
 	req->data.headers = headers;
 	req->data.headers["Host"] = bstore->host;
-	req->data.headers["Accept"] = "application/xml";
 
 	// Avoid to send request with an empty resouce.
 	if (resource.empty()) {
@@ -344,14 +345,7 @@ ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<IBlobSt
 			connID = rconn.conn->getDebugID();
 			reqStartTimer = g_network->timer();
 
-			bstore->setAllAuthHeaders(verb, resource, req->data.headers);
-
-			std::vector<std::string> queryParameters;
-			canonicalURI = bstore->canonicalizeURI(resource, queryParameters);
-			if (!queryParameters.empty()) {
-				canonicalURI += "?";
-				canonicalURI += boost::algorithm::join(queryParameters, "&");
-			}
+			bstore->setAllRequestHeaders(verb, resource, req->data.headers);
 
 			if (bstore->useProxy && bstore->knobs.secure_connection == 0) {
 				// Has to be in absolute-form.

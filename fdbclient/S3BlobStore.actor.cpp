@@ -384,10 +384,6 @@ static S3BlobStoreEndpoint::Credentials getSecretSdk() {
 }
 
 ACTOR Future<Void> updateSecret_impl(Reference<S3BlobStoreEndpoint> b) {
-	if (!(b->lookupKey || b->lookupSecret || b->knobs.sdk_auth)) {
-		return Void();
-	}
-
 	if (b->knobs.sdk_auth) {
 		b->credentials = getSecretSdk();
 		return Void();
@@ -455,18 +451,23 @@ ACTOR Future<Void> updateSecret_impl(Reference<S3BlobStoreEndpoint> b) {
 	throw backup_auth_missing();
 }
 
+bool S3BlobStoreEndpoint::lookupSecretOnEachRequest() {
+	return lookupSecret || lookupKey || knobs.sdk_auth;
+}
+
 Future<Void> S3BlobStoreEndpoint::updateSecret() {
 	return updateSecret_impl(Reference<S3BlobStoreEndpoint>::addRef(this));
 }
 
-void S3BlobStoreEndpoint::setAllAuthHeaders(const std::string& verb,
-                                            const std::string& resource,
-                                            HTTP::Headers& headers,
-                                            std::string date,
-                                            std::string datestamp) {
+void S3BlobStoreEndpoint::setAllRequestHeaders(const std::string& verb,
+                                               const std::string& resource,
+                                               HTTP::Headers& headers,
+                                               std::string date,
+                                               std::string datestamp) {
 	// Finish/update the request headers (which includes Date header)
 	// This must be done AFTER the connection is ready because if credentials are coming from disk they are
 	// refreshed when a new connection is established and setAuthHeaders() would need the updated secret.
+	headers["Accept"] = "application/xml";
 	if (credentials.present() && !credentials.get().securityToken.empty())
 		headers["x-amz-security-token"] = credentials.get().securityToken;
 	if (CLIENT_KNOBS->HTTP_REQUEST_AWS_V4_HEADER) {
@@ -476,9 +477,20 @@ void S3BlobStoreEndpoint::setAllAuthHeaders(const std::string& verb,
 	}
 }
 
-std::string S3BlobStoreEndpoint::canonicalizeURI(const std::string& resource,
-                                                 std::vector<std::string>& queryParameters) {
+std::string S3BlobStoreEndpoint::normalizeURIForRemoteRequest(const std::string& resource) {
 	bool isV4 = CLIENT_KNOBS->HTTP_REQUEST_AWS_V4_HEADER;
+	std::vector<std::string> queryParameters;
+	std::string canonicalURI = awsCanonicalURI(resource, queryParameters, isV4);
+	if (!queryParameters.empty()) {
+		canonicalURI += "?";
+		canonicalURI += boost::algorithm::join(queryParameters, "&");
+	}
+	return canonicalURI;
+}
+
+std::string S3BlobStoreEndpoint::awsCanonicalURI(const std::string& resource,
+                                                 std::vector<std::string>& queryParameters,
+                                                 bool isV4) {
 	StringRef resourceRef(resource);
 	resourceRef.eat("/");
 	std::string canonicalURI("/" + resourceRef.toString());
@@ -888,7 +900,7 @@ void S3BlobStoreEndpoint::setV4AuthHeaders(std::string const& verb,
 	// ************* TASK 1: CREATE A CANONICAL REQUEST *************
 	// Create canonical URI--the part of the URI from domain to query string (use '/' if no path)
 	std::vector<std::string> queryParameters;
-	std::string canonicalURI = canonicalizeURI(resource, queryParameters);
+	std::string canonicalURI = awsCanonicalURI(resource, queryParameters, true);
 
 	std::string canonicalQueryString;
 	if (!queryParameters.empty()) {
@@ -1308,7 +1320,7 @@ TEST_CASE("/backup/s3/guess_region") {
 
 	url = "blobstore://s3.us-west-2.amazonaws.com/resource_name?bucket=bucket_name&sc=922337203685477580700";
 	try {
-		s3 = S3BlobStoreEndpoint::fromString(url, {}, &resource, &error, &parameters);
+		s3 = IBlobStoreEndpoint::fromString(url, {}, &resource, &error, &parameters);
 		ASSERT(false); // not reached
 	} catch (Error& e) {
 		// conversion of 922337203685477580700 to long int will overflow
