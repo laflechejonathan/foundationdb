@@ -37,7 +37,7 @@
 #include "fdbrpc/simulator.h"
 #include "flow/Platform.h"
 #include "fdbclient/AsyncFileBlobStore.actor.h"
-#include "fdbclient/S3BlobStore.h"
+#include "fdbclient/IKnobCollection.h"
 #ifdef BUILD_AZURE_BACKUP
 #include "fdbclient/BackupContainerAzureBlobStore.h"
 #endif

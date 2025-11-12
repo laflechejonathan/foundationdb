@@ -20,7 +20,7 @@
 
 #include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/BackupContainer.h"
-#include "fdbclient/S3BlobStore.h"
+#include "fdbclient/IKnobCollection.h"
 #include "flow/BooleanParam.h"
 #ifdef BUILD_AZURE_BACKUP
 #include "fdbclient/BackupContainerAzureBlobStore.h"
@@ -28,7 +28,6 @@
 #include "fdbclient/BackupContainerFileSystem.h"
 #include "fdbclient/BackupContainerLocalDirectory.h"
 #include "fdbclient/BackupContainerBlobStore.h"
-#include "fdbclient/JsonBuilder.h"
 #include "flow/StreamCipher.h"
 #include "flow/UnitTest.h"
 
@@ -1654,18 +1653,20 @@ Reference<BackupContainerFileSystem> BackupContainerFileSystem::openContainerFS(
 			r = makeReference<BackupContainerLocalDirectory>(url, encryptionKeyFileName);
 		} else if (u.startsWith("blobstore://"_sr)) {
 			std::string resource;
-
-			// The URL parameters contain blobstore endpoint tunables as well as possible backup-specific options.
-			IBlobStoreEndpoint::ParametersT backupParams;
-			Reference<IBlobStoreEndpoint> bstore;
 			Optional<std::string> blobstoreProxy;
+
+			// If no proxy is passed down to the openContainer method, try to fallback to the
+			// fileBackupAgentProxy which is a global variable and will be set for the backup_agent.
 			if (proxy.present()) {
 				blobstoreProxy = proxy.get();
 			} else if (fileBackupAgentProxy.present()) {
 				blobstoreProxy = fileBackupAgentProxy.get();
 			}
 
-			bstore = IBlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
+			// The URL parameters contain blobstore endpoint tunables as well as possible backup-specific options.
+			IBlobStoreEndpoint::ParametersT backupParams;
+			Reference<IBlobStoreEndpoint> bstore =
+			    IBlobStoreEndpoint::fromString(url, blobstoreProxy, &resource, &lastOpenError, &backupParams);
 
 			BackupContainerBlobStore::validateBackupUrl(resource);
 			r = makeReference<BackupContainerBlobStore>(

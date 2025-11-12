@@ -24,14 +24,11 @@
 #include <unordered_map>
 #include <functional>
 #include "flow/IRandom.h"
-#include "flow/flow.h"
 #include "flow/Net2Packet.h"
-#include "fdbclient/Knobs.h"
-#include "flow/IRateControl.h"
-#include "fdbrpc/HTTP.h"
 #include "fdbclient/JSONDoc.h"
 #include "flow/IConnection.h"
 #include "fdbclient/IBlobStoreEndpoint.h"
+#include "fdbrpc/HTTP.h"
 
 #include <boost/functional/hash.hpp>
 

@@ -3,9 +3,13 @@
 //
 #include "boost/algorithm/string/join.hpp"
 #include "fdbclient/IBlobStoreEndpoint.h"
+#include "fdbclient/IKnobCollection.h"
 #include "fdbclient/Knobs.h"
 #include "fdbclient/S3BlobStore.h"
+#include "fdbrpc/HTTP.h"
+#include "flow/Hostname.h"
 #include "flow/IAsyncFile.h"
+#include "flow/IConnection.h"
 #include "flow/actorcompiler.h" // has to be last include
 
 json_spirit::mObject IBlobStoreEndpoint::Stats::getJSON() {
@@ -346,6 +350,7 @@ ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<IBlobSt
 			reqStartTimer = g_network->timer();
 
 			bstore->setAllRequestHeaders(verb, resource, req->data.headers);
+			canonicalURI = bstore->normalizeURIForRemoteRequest(resource);
 
 			if (bstore->useProxy && bstore->knobs.secure_connection == 0) {
 				// Has to be in absolute-form.

@@ -18,8 +18,8 @@
  * limitations under the License.
  */
 
+#include "fdbclient/IKnobCollection.h"
 #include "fdbclient/S3BlobStore.h"
-
 #include "flow/IConnection.h"
 #include "md5/md5.h"
 #include "libb64/encode.h"
