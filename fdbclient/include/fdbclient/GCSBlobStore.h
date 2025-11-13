@@ -47,7 +47,6 @@ public:
 	                    HTTP::Headers extraHeaders = HTTP::Headers());
 
 	Optional<Credentials> credentials;
-	bool lookupToken;
 
 	std::string getResourceURL(std::string resource, std::string params) const override;
 	std::string normalizeURIForRemoteRequest(const std::string& resource) override;

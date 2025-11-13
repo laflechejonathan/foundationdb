@@ -26,6 +26,9 @@
 #include <fstream>
 
 #include "flow/actorcompiler.h" // has to be last include
+#include "libb64/encode.h"
+
+#include <openssl/md5.h>
 
 Optional<GCSBlobStoreEndpoint::Credentials> parseGcpCredentials(Optional<StringRef> const& credString) {
 	if (credString.present()) {
@@ -43,7 +46,10 @@ GCSBlobStoreEndpoint::GCSBlobStoreEndpoint(std::string const& host,
                                            HTTP::Headers extraHeaders)
   : IBlobStoreEndpoint(host, service, "auto", proxyHost, proxyPort, knobs, extraHeaders),
     credentials(parseGcpCredentials(creds)) {
-	lookupToken = credentials.present() && credentials.get().token.empty();
+	// GCS only works with dynamic credential fetching
+	if (!credentials.present() || !credentials.get().token.empty()) {
+		throw backup_auth_missing();
+	}
 }
 
 std::string GCSBlobStoreEndpoint::normalizeURIForRemoteRequest(const std::string& resource) {
@@ -57,17 +63,7 @@ std::string GCSBlobStoreEndpoint::getResourceURL(std::string resource, std::stri
 		hostPort.append(service);
 	}
 
-	std::string credsString;
-	if (credentials.present()) {
-		// If secret isn't being looked up from credentials files then it was passed explicitly in the URL so show it
-		// here.
-		if (!lookupToken) {
-			credsString = credentials.get().token;
-		}
-		credsString += "@";
-	}
-
-	std::string r = format("blobstore://%s%s/%s", credsString.c_str(), hostPort.c_str(), resource.c_str());
+	std::string r = format("blobstore://@%s/%s", hostPort.c_str(), resource.c_str());
 
 	// Get params that are deviations from knob defaults
 	std::string knobParams = knobs.getURLParameters();
@@ -137,7 +133,7 @@ Future<Void> GCSBlobStoreEndpoint::updateSecret() {
 }
 
 bool GCSBlobStoreEndpoint::lookupSecretOnEachRequest() {
-	return lookupToken;
+	return true;
 }
 
 void GCSBlobStoreEndpoint::setAllRequestHeaders(const std::string& verb,
@@ -151,6 +147,14 @@ void GCSBlobStoreEndpoint::setAllRequestHeaders(const std::string& verb,
 	}
 }
 
+std::string constructResourceURL(std::string const& bucket,
+                                 std::string const& object,
+                                 std::string const& queryStrings) {
+	return format("/storage/v1/b/%s/o/%s?%s",
+	              HTTP::gcpPathParamUrlEncode(bucket).c_str(),
+	              HTTP::gcpPathParamUrlEncode(object).c_str(),
+	              queryStrings.c_str());
+}
 ACTOR Future<int> readObject_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                   std::string bucket,
                                   std::string object,
@@ -159,23 +163,18 @@ ACTOR Future<int> readObject_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                   int64_t offset) {
 	if (length <= 0)
 		return 0;
-
 	wait(bstore->requestRateRead->getAllowance(1));
 
-	std::string resource =
-	    format("/storage/v1/b/%s/o/%s?alt=media", bucket.c_str(), HTTP::awsV4URIEncode(object, true).c_str());
-
+	std::string resource = constructResourceURL(bucket, object, "alt=media");
 	HTTP::Headers headers;
 	if (offset > 0 || length > 0) {
 		headers["Range"] = format("bytes=%lld-%lld", offset, offset + length - 1);
 	}
-
 	Reference<HTTP::IncomingResponse> r =
 	    wait(bstore->doRequest("GET", resource, headers, nullptr, 0, { 200, 206, 404 }));
 
 	if (r->code == 404)
 		throw file_not_found();
-
 	if (r->data.contentLen != r->data.content.size())
 		throw io_error();
 
@@ -194,16 +193,14 @@ Future<int> GCSBlobStoreEndpoint::readObject(std::string const& bucket,
 ACTOR Future<std::string> readEntireFile_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                               std::string bucket,
                                               std::string object) {
-	state int64_t size = wait(bstore->objectSize(bucket, object));
-	state std::string result;
-	result.resize(size);
-
-	int bytesRead = wait(bstore->readObject(bucket, object, &result[0], size, 0));
-
-	if (bytesRead != size)
-		throw io_error();
-
-	return result;
+	wait(bstore->requestRateRead->getAllowance(1));
+	std::string resource = constructResourceURL(bucket, object, "alt=media");
+	HTTP::Headers headers;
+	Reference<HTTP::IncomingResponse> r =
+	    wait(bstore->doRequest("GET", resource, headers, nullptr, 0, { 200, 206, 404 }));
+	if (r->code == 404)
+		throw file_not_found();
+	return r->data.content;
 }
 
 Future<std::string> GCSBlobStoreEndpoint::readEntireFile(std::string const& bucket, std::string const& object) {
@@ -211,7 +208,8 @@ Future<std::string> GCSBlobStoreEndpoint::readEntireFile(std::string const& buck
 }
 
 ACTOR Future<bool> bucketExists_impl(Reference<GCSBlobStoreEndpoint> bstore, std::string bucket) {
-	std::string resource = format("/storage/v1/b/%s", bucket.c_str());
+	wait(bstore->requestRateRead->getAllowance(1));
+	std::string resource = format("/storage/v1/b/%s", HTTP::gcpPathParamUrlEncode(bucket).c_str());
 	Reference<HTTP::IncomingResponse> r = wait(bstore->doRequest("GET", resource, {}, nullptr, 0, { 200, 404 }));
 	return r->code == 200;
 }
@@ -235,9 +233,8 @@ Future<Void> GCSBlobStoreEndpoint::createBucket(std::string const& bucket) {
 }
 
 ACTOR Future<std::vector<std::string>> listBuckets_impl(Reference<GCSBlobStoreEndpoint> bstore) {
-	std::string resource = "/storage/v1/b";
-
-	Reference<HTTP::IncomingResponse> r = wait(bstore->doRequest("GET", resource, {}, nullptr, 0, { 200 }));
+	wait(bstore->requestRateRead->getAllowance(1));
+	Reference<HTTP::IncomingResponse> r = wait(bstore->doRequest("GET", "/storage/v1/b", {}, nullptr, 0, { 200 }));
 
 	std::string response(r->data.content.begin(), r->data.content.end());
 
@@ -273,7 +270,10 @@ Future<std::vector<std::string>> GCSBlobStoreEndpoint::listBuckets() {
 }
 
 ACTOR Future<bool> objectExists_impl(Reference<GCSBlobStoreEndpoint> bstore, std::string bucket, std::string object) {
-	std::string resource = format("/storage/v1/b/%s/o/%s", bucket.c_str(), HTTP::awsV4URIEncode(object, true).c_str());
+	wait(bstore->requestRateRead->getAllowance(1));
+	std::string resource = format("/storage/v1/b/%s/o/%s",
+	                              HTTP::gcpPathParamUrlEncode(bucket).c_str(),
+	                              HTTP::gcpPathParamUrlEncode(object).c_str());
 	Reference<HTTP::IncomingResponse> r = wait(bstore->doRequest("GET", resource, {}, nullptr, 0, { 200, 404 }));
 	return r->code == 200;
 }
@@ -283,14 +283,12 @@ Future<bool> GCSBlobStoreEndpoint::objectExists(std::string const& bucket, std::
 }
 
 ACTOR Future<int64_t> objectSize_impl(Reference<GCSBlobStoreEndpoint> bstore, std::string bucket, std::string object) {
-	std::string resource =
-	    format("/storage/v1/b/%s/o/%s?fields=size", bucket.c_str(), HTTP::awsV4URIEncode(object, true).c_str());
+	wait(bstore->requestRateRead->getAllowance(1));
 
+	std::string resource = constructResourceURL(bucket, object, "fields=size");
 	Reference<HTTP::IncomingResponse> r = wait(bstore->doRequest("GET", resource, {}, nullptr, 0, { 200, 404 }));
-
 	if (r->code == 404)
 		throw file_not_found();
-
 	std::string response(r->data.content.begin(), r->data.content.end());
 
 	json_spirit::mValue json;
@@ -314,11 +312,11 @@ Future<int64_t> GCSBlobStoreEndpoint::objectSize(std::string const& bucket, std:
 ACTOR Future<Void> deleteObject_impl(Reference<GCSBlobStoreEndpoint> bstore, std::string bucket, std::string object) {
 	wait(bstore->requestRateDelete->getAllowance(1));
 
-	std::string resource = format("/storage/v1/b/%s/o/%s", bucket.c_str(), HTTP::awsV4URIEncode(object, true).c_str());
-
+	std::string resource = format("/storage/v1/b/%s/o/%s",
+	                              HTTP::gcpPathParamUrlEncode(bucket).c_str(),
+	                              HTTP::gcpPathParamUrlEncode(object).c_str());
 	Reference<HTTP::IncomingResponse> r =
 	    wait(bstore->doRequest("DELETE", resource, {}, nullptr, 0, { 200, 204, 404 }));
-
 	if (r->code == 404)
 		throw file_not_found();
 
@@ -342,22 +340,35 @@ ACTOR Future<Void> deleteRecursively_impl(Reference<GCSBlobStoreEndpoint> bstore
 		return Void();
 	});
 
-	state std::vector<Future<Void>> deleteFutures;
+	state std::list<Future<Void>> deleteFutures;
 
 	try {
 		loop {
-			GCSBlobStoreEndpoint::ListResult res = waitNext(resultStream.getFuture());
+			choose {
+				// Throw if done throws, otherwise don't stop until end_of_stream
+				when(wait(done)) {
+					done = Never();
+				}
 
-			for (auto& object : res.objects) {
-				deleteFutures.push_back(map(bstore->deleteObject(bucket, object.name), [=](Void) {
-					if (pNumDeleted != nullptr) {
-						++(*pNumDeleted);
+				when(GCSBlobStoreEndpoint::ListResult list = waitNext(resultStream.getFuture())) {
+					for (auto& object : list.objects) {
+						deleteFutures.push_back(map(bstore->deleteObject(bucket, object.name), [=](Void) {
+							if (pNumDeleted != nullptr) {
+								++(*pNumDeleted);
+							}
+							if (pBytesDeleted != nullptr) {
+								(*pBytesDeleted) += object.size;
+							}
+							return Void();
+						}));
 					}
-					if (pBytesDeleted != nullptr) {
-						(*pBytesDeleted) += object.size;
-					}
-					return Void();
-				}));
+				}
+			}
+
+			// This is just a precaution to avoid having too many outstanding delete actors waiting to run
+			while (deleteFutures.size() > CLIENT_KNOBS->BLOBSTORE_CONCURRENT_REQUESTS) {
+				wait(deleteFutures.front());
+				deleteFutures.pop_front();
 			}
 		}
 	} catch (Error& e) {
@@ -366,8 +377,10 @@ ACTOR Future<Void> deleteRecursively_impl(Reference<GCSBlobStoreEndpoint> bstore
 	}
 
 	wait(done);
-	wait(waitForAll(deleteFutures));
-
+	while (deleteFutures.size() > 0) {
+		wait(deleteFutures.front());
+		deleteFutures.pop_front();
+	}
 	return Void();
 }
 
@@ -379,26 +392,37 @@ Future<Void> GCSBlobStoreEndpoint::deleteRecursively(std::string const& bucket,
 	    Reference<GCSBlobStoreEndpoint>::addRef(this), bucket, prefix, pNumDeleted, pBytesDeleted);
 }
 
+void checkMd5Hash(Reference<HTTP::IncomingResponse> response, std::string const& contentMD5) {
+	json_spirit::mValue respJson;
+	if (!json_spirit::read_string(response->data.content, respJson))
+		throw http_request_failed();
+
+	auto obj = respJson.get_obj();
+	auto it = obj.find("md5Hash");
+	if (it == obj.end() || it->second.get_str() != contentMD5)
+		throw checksum_failed();
+}
+
 ACTOR Future<Void> writeEntireFileFromBuffer_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                                   std::string bucket,
                                                   std::string object,
                                                   UnsentPacketQueue* pContent,
                                                   int contentLen,
                                                   std::string contentMD5) {
+	if (contentLen > bstore->knobs.multipart_max_part_size)
+		throw file_too_large();
+
 	wait(bstore->requestRateWrite->getAllowance(1));
 	wait(bstore->concurrentUploads.take());
 	state FlowLock::Releaser uploadReleaser(bstore->concurrentUploads, 1);
 
 	std::string resource = format("/upload/storage/v1/b/%s/o?uploadType=media&name=%s",
-	                              bucket.c_str(),
-	                              HTTP::awsV4URIEncode(object, true).c_str());
+	                              HTTP::gcpPathParamUrlEncode(bucket).c_str(),
+	                              HTTP::gcpPathParamUrlEncode(object).c_str());
 
 	HTTP::Headers headers;
 	headers["Content-Type"] = "application/octet-stream";
 	headers["Content-Length"] = std::to_string(contentLen);
-	if (!contentMD5.empty()) {
-		headers["Content-MD5"] = contentMD5;
-	}
 
 	Reference<HTTP::IncomingResponse> r =
 	    wait(bstore->doRequest("POST", resource, headers, pContent, contentLen, { 200, 201 }));
@@ -406,9 +430,7 @@ ACTOR Future<Void> writeEntireFileFromBuffer_impl(Reference<GCSBlobStoreEndpoint
 	if (r->code != 200 && r->code != 201)
 		throw http_request_failed();
 
-	if (!contentMD5.empty() && !HTTP::verifyMD5(&r->data, false, contentMD5))
-		throw checksum_failed();
-
+	checkMd5Hash(r, contentMD5);
 	return Void();
 }
 
@@ -426,24 +448,28 @@ ACTOR Future<Void> writeEntireFile_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                         std::string object,
                                         std::string content) {
 	state UnsentPacketQueue packets;
+	if (content.size() > bstore->knobs.multipart_max_part_size)
+		throw file_too_large();
 
-	std::string resource = format("/upload/storage/v1/b/%s/o?uploadType=media&name=%s",
-	                              bucket.c_str(),
-	                              HTTP::awsV4URIEncode(object, true).c_str());
+	PacketWriter pw(packets.getWriteBuffer(content.size()), nullptr, Unversioned());
+	pw.serializeBytes(content);
 
-	PacketWriter writer(packets.getWriteBuffer(content.size()), nullptr, Unversioned());
-	writer.serializeBytes(content);
+	// Yield because we may have just had to copy several MB's into packet buffer chain and next we have to calculate an
+	// MD5 sum of it.
+	// TODO:  If this actor is used to send large files then combine the summing and packetization into a loop with a
+	// yield() every 20k or so.
+	wait(yield());
 
-	HTTP::Headers headers;
-	headers["Content-Type"] = "application/octet-stream";
-	headers["Content-Length"] = std::to_string(content.size());
+	MD5_CTX sum;
+	::MD5_Init(&sum);
+	::MD5_Update(&sum, content.data(), content.size());
+	std::string sumBytes;
+	sumBytes.resize(16);
+	::MD5_Final((unsigned char*)sumBytes.data(), &sum);
+	std::string contentMD5 = base64::encoder::from_string(sumBytes);
+	contentMD5.resize(contentMD5.size() - 1);
 
-	Reference<HTTP::IncomingResponse> r =
-	    wait(bstore->doRequest("POST", resource, headers, &packets, content.size(), { 200, 201 }));
-
-	if (r->code != 200 && r->code != 201)
-		throw http_request_failed();
-
+	wait(writeEntireFileFromBuffer_impl(bstore, bucket, object, &packets, content.size(), contentMD5));
 	return Void();
 }
 
@@ -456,9 +482,11 @@ Future<Void> GCSBlobStoreEndpoint::writeEntireFile(std::string const& bucket,
 ACTOR Future<std::string> beginMultiPartUpload_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                                     std::string bucket,
                                                     std::string object) {
+	wait(bstore->requestRateWrite->getAllowance(1));
+
 	std::string resource = format("/upload/storage/v1/b/%s/o?uploadType=resumable&name=%s",
-	                              bucket.c_str(),
-	                              HTTP::awsV4URIEncode(object, true).c_str());
+	                              HTTP::gcpPathParamUrlEncode(bucket).c_str(),
+	                              HTTP::gcpPathParamUrlEncode(object).c_str());
 
 	HTTP::Headers headers;
 	headers["Content-Type"] = "application/octet-stream";
@@ -482,6 +510,12 @@ Future<std::string> GCSBlobStoreEndpoint::beginMultiPartUpload(std::string const
 	return beginMultiPartUpload_impl(Reference<GCSBlobStoreEndpoint>::addRef(this), bucket, object);
 }
 
+std::string constructResumableUploadURL(std::string const& bucket, std::string const& uploadID) {
+	return format("/upload/storage/v1/b/%s/o?uploadType=resumable&upload_id=%s",
+	              HTTP::gcpPathParamUrlEncode(bucket).c_str(),
+	              HTTP::gcpPathParamUrlEncode(uploadID).c_str());
+}
+
 ACTOR Future<std::string> uploadPart_impl(Reference<GCSBlobStoreEndpoint> bstore,
                                           std::string bucket,
                                           std::string object,
@@ -490,8 +524,11 @@ ACTOR Future<std::string> uploadPart_impl(Reference<GCSBlobStoreEndpoint> bstore
                                           UnsentPacketQueue* pContent,
                                           int contentLen,
                                           std::string contentMD5) {
-	std::string resource =
-	    format("/upload/storage/v1/b/%s/o?uploadType=resumable&upload_id=%s", bucket.c_str(), uploadID.c_str());
+	wait(bstore->requestRateWrite->getAllowance(1));
+	wait(bstore->concurrentUploads.take());
+	state FlowLock::Releaser uploadReleaser(bstore->concurrentUploads, 1);
+
+	std::string resource = constructResumableUploadURL(bucket, uploadID);
 
 	int64_t rangeStart = (partNumber - 1) * contentLen;
 	int64_t rangeEnd = rangeStart + contentLen - 1;
@@ -500,15 +537,11 @@ ACTOR Future<std::string> uploadPart_impl(Reference<GCSBlobStoreEndpoint> bstore
 	headers["Content-Type"] = "application/octet-stream";
 	headers["Content-Length"] = std::to_string(contentLen);
 	headers["Content-Range"] = format("bytes %lld-%lld/*", rangeStart, rangeEnd);
-	if (!contentMD5.empty()) {
-		headers["Content-MD5"] = contentMD5;
-	}
 
 	Reference<HTTP::IncomingResponse> r =
 	    wait(bstore->doRequest("PUT", resource, headers, pContent, contentLen, { 200, 308 }));
 
-	if (!contentMD5.empty() && !HTTP::verifyMD5(&r->data, false, contentMD5))
-		throw checksum_failed();
+	checkMd5Hash(r, contentMD5);
 
 	return format("part-%d", partNumber);
 }
@@ -535,16 +568,17 @@ ACTOR Future<Void> finishMultiPartUpload_impl(Reference<GCSBlobStoreEndpoint> bs
                                               std::string object,
                                               std::string uploadID,
                                               GCSBlobStoreEndpoint::MultiPartSetT parts) {
+	wait(bstore->requestRateWrite->getAllowance(1));
+
 	state int totalParts = parts.size();
 	if (totalParts == 0)
-		throw http_bad_response();
+		throw io_error();
 
 	int lastPartNum = parts.rbegin()->first;
 	int contentLen = 0;
 	int64_t totalSize = lastPartNum * contentLen;
 
-	std::string resource =
-	    format("/upload/storage/v1/b/%s/o?uploadType=resumable&upload_id=%s", bucket.c_str(), uploadID.c_str());
+	std::string resource = constructResumableUploadURL(bucket, uploadID);
 
 	HTTP::Headers headers;
 	headers["Content-Length"] = "0";
@@ -569,9 +603,8 @@ ACTOR Future<Void> listObjectsStream_impl(Reference<GCSBlobStoreEndpoint> bstore
                                           Optional<char> delimiter,
                                           int maxDepth,
                                           std::function<bool(std::string const&)> recurseFilter) {
-	wait(bstore->requestRateList->getAllowance(1));
-
-	state std::string resource = format("/storage/v1/b/%s/o?maxResults=1000", bucket.c_str());
+	state std::string resource =
+	    format("/storage/v1/b/%s/o?maxResults=1000", HTTP::gcpPathParamUrlEncode(bucket).c_str());
 	if (prefix.present())
 		resource += format("&prefix=%s", prefix.get().c_str());
 	if (delimiter.present())
@@ -692,10 +725,18 @@ ACTOR Future<GCSBlobStoreEndpoint::ListResult> listObjects_impl(Reference<GCSBlo
 
 	try {
 		loop {
-			GCSBlobStoreEndpoint::ListResult res = waitNext(resultStream.getFuture());
-			results.commonPrefixes.insert(
-			    results.commonPrefixes.end(), res.commonPrefixes.begin(), res.commonPrefixes.end());
-			results.objects.insert(results.objects.end(), res.objects.begin(), res.objects.end());
+			choose {
+				// Throw if done throws, otherwise don't stop until end_of_stream
+				when(wait(done)) {
+					done = Never();
+				}
+
+				when(GCSBlobStoreEndpoint::ListResult info = waitNext(resultStream.getFuture())) {
+					results.commonPrefixes.insert(
+					    results.commonPrefixes.end(), info.commonPrefixes.begin(), info.commonPrefixes.end());
+					results.objects.insert(results.objects.end(), info.objects.begin(), info.objects.end());
+				}
+			}
 		}
 	} catch (Error& e) {
 		if (e.code() != error_code_end_of_stream)
