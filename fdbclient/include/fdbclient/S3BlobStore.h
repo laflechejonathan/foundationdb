@@ -21,16 +21,10 @@
 #pragma once
 
 #include <map>
-#include <unordered_map>
 #include <functional>
-#include "flow/IRandom.h"
 #include "flow/Net2Packet.h"
-#include "fdbclient/JSONDoc.h"
-#include "flow/IConnection.h"
 #include "fdbclient/IBlobStoreEndpoint.h"
 #include "fdbrpc/HTTP.h"
-
-#include <boost/functional/hash.hpp>
 
 // Representation of all the things you need to connect to a blob store instance with some credentials.
 // Reference counted because a very large number of them could be needed.
@@ -64,19 +58,6 @@ public:
 	                    HTTP::Headers extraHeaders = HTTP::Headers());
 
 	typedef std::map<std::string, std::string> ParametersT;
-
-	// FIXME: add periodic connection reaper to pool
-	// local connection pool for this blobstore
-	Reference<ConnectionPoolData> connectionPool;
-	Future<ReusableConnection> connect(bool* reusingConn);
-	void returnConnection(ReusableConnection& conn);
-
-	std::string host;
-	std::string service;
-	std::string region;
-	Optional<std::string> proxyHost;
-	Optional<std::string> proxyPort;
-	bool useProxy;
 
 	Optional<Credentials> credentials;
 	bool lookupKey;
