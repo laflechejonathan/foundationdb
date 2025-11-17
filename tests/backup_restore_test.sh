@@ -239,7 +239,7 @@ readonly TAG="test_backup"
 # OKTETO_NAMESPACE is defined (It is defined on the okteto
 # internal apple dev environments where S3 is available).
 readonly USE_S3="${USE_S3:-$( if [[ -n "${OKTETO_NAMESPACE+x}" ]]; then echo "true" ; else echo "false"; fi )}"
-readonly USE_GCS="$( if [[ -n "${GCS_FDB_BUCKET}" && -n "${GCS_APPLICATION_TOKEN}" ]]; then echo "true"; else echo "false"; fi )"
+readonly USE_GCS="$( if [[ -n "${GCS_FDB_BUCKET+x}" && -n "${GCS_APPLICATION_TOKEN+x}" ]]; then echo "true"; else echo "false"; fi )"
 
 # Set KNOBS based on whether we're using real S3, GCS, or SeaweedFS
 if [[ "${USE_S3}" == "true" ]]; then
@@ -400,7 +400,7 @@ else
     err "Failed to run seaweed"
     return 1
   fi
-  readonly host
+  readonly host="@$host"
   readonly bucket="${SEAWEED_BUCKET}"
   readonly region="all_regions"
   # Reference a non-existent blob file (its ignored by seaweed)
